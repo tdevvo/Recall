@@ -1,0 +1,2 @@
+# runtime dependencies (same as pyproject.toml; prefer `pip install .`)
+PySide6-Essentials
