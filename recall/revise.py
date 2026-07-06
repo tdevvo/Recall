@@ -151,7 +151,9 @@ class Reviser(QObject):
             "max_tokens": 16000,
             "thinking": {"type": "adaptive"},
             "system": SYSTEM,
-            "output_config": {"format": OUTPUT_SCHEMA},
+            # effort defaults to "high"; revisions are mechanical edits, so
+            # "medium" trims thinking time noticeably without hurting quality
+            "output_config": {"format": OUTPUT_SCHEMA, "effort": "medium"},
             "messages": [{"role": "user", "content": prompt}],
         }
 
@@ -270,6 +272,9 @@ class Reviser(QObject):
                         self.outputLine.emit(f"⏺ {name} {args_s}")
             elif t == "result":
                 self.outputLine.emit(f"— finished in {msg.get('duration_ms', 0) / 1000:.0f}s —")
+        # the agent writes through the MCP server between poll ticks; check now
+        # so its edits show in the reader as soon as the stream reports them
+        self._store.checkExternalChanges()
 
     def _on_cli_done(self, proc, code, doc_id):
         try:

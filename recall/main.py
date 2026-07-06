@@ -19,6 +19,14 @@ CLARIFY_BG = QColor("#fff8e1")        # cream, matches the request-bubble scheme
 CLARIFY_HOVER_BG = QColor("#ffe082")  # deeper gold while hovered
 CODE_FG = QColor("#eceff1")           # light code text; QML draws the dark slab
 
+# Reader block spacing. Adjacent block margins collapse to the larger of the
+# two, so each value below is the full gap that side contributes.
+PARA_MARGIN = 14        # plain paragraphs, blockquotes, etc.
+LIST_MARGIN = 6         # tighter rhythm between items within a list
+HEADING_BOTTOM = 10
+CODE_MARGIN = 28        # outside the slab; QML's slab overdraws CODE_SLAB_PAD
+                        # of it (12px), leaving a 16px visible gap each side
+
 
 class Highlighter(QObject):
     """Styles the reader's QTextDocument after each markdown load.
@@ -101,12 +109,13 @@ class Highlighter(QObject):
         block = doc.begin()
         while block.isValid():
             bf = block.blockFormat()
-            if bf.headingLevel() > 0:
-                top = 26 - 4 * min(bf.headingLevel(), 4)
+            is_heading = bf.headingLevel() > 0
+            if is_heading:
+                top = 30 - 4 * min(bf.headingLevel(), 4)
                 if bf.topMargin() != top:
                     nbf = QTextBlockFormat()
                     nbf.setTopMargin(top)
-                    nbf.setBottomMargin(8)
+                    nbf.setBottomMargin(HEADING_BOTTOM)
                     QTextCursor(block).mergeBlockFormat(nbf)
             # markdown import marks code lines as non-breakable one-line blocks
             is_code = bf.nonBreakableLines() or bf.hasProperty(QTextFormat.BlockCodeLanguage)
@@ -116,9 +125,9 @@ class Highlighter(QObject):
                 # the run from the start/end positions we report.
                 if run is None:
                     run = {"start": block.position(), "lines": []}
-                    if bf.topMargin() != 18:
+                    if bf.topMargin() != CODE_MARGIN:
                         nbf = QTextBlockFormat()
-                        nbf.setTopMargin(18)
+                        nbf.setTopMargin(CODE_MARGIN)
                         QTextCursor(block).mergeBlockFormat(nbf)
                 it = block.begin()
                 styled = (not it.atEnd() and
@@ -132,14 +141,25 @@ class Highlighter(QObject):
                 run["lines"].append(block.text())
                 run["end"] = block.position() + max(0, block.length() - 1)
                 prev_code_block = block
-            elif run is not None:
-                if prev_code_block.blockFormat().bottomMargin() != 18:
-                    nbf = QTextBlockFormat()
-                    nbf.setBottomMargin(18)
-                    QTextCursor(prev_code_block).mergeBlockFormat(nbf)
-                runs.append({"start": run["start"], "end": run["end"],
-                             "text": "\n".join(run["lines"])})
-                run = None
+            else:
+                if run is not None:
+                    if prev_code_block.blockFormat().bottomMargin() != CODE_MARGIN:
+                        nbf = QTextBlockFormat()
+                        nbf.setBottomMargin(CODE_MARGIN)
+                        QTextCursor(prev_code_block).mergeBlockFormat(nbf)
+                    runs.append({"start": run["start"], "end": run["end"],
+                                 "text": "\n".join(run["lines"])})
+                    run = None
+                if not is_heading:
+                    # paragraphs, list items, quotes — everything else gets an
+                    # explicit vertical rhythm instead of Qt's import defaults
+                    margin = LIST_MARGIN if block.textList() else PARA_MARGIN
+                    if ((bf.topMargin() != margin or bf.bottomMargin() != margin)
+                            and QTextCursor(block).currentTable() is None):
+                        nbf = QTextBlockFormat()
+                        nbf.setTopMargin(margin)
+                        nbf.setBottomMargin(margin)
+                        QTextCursor(block).mergeBlockFormat(nbf)
             block = block.next()
         if run is not None:
             runs.append({"start": run["start"], "end": run["end"],

@@ -1027,13 +1027,15 @@ ApplicationWindow {
                             color: "#263238"
                             x: -12
                             width: docView.width + 24
-                            // touch width/text so geometry re-resolves on relayout
-                            y: { docView.width; docView.text; return docView.posRect(codeSlab.modelData.start).y - 10 }
+                            // touch width/text so geometry re-resolves on relayout.
+                            // 12px interior pad each side; stays inside the 28px
+                            // code margins so a 16px gap is visible around the slab
+                            y: { docView.width; docView.text; return docView.posRect(codeSlab.modelData.start).y - 12 }
                             height: {
                                 docView.width
                                 docView.text
                                 var r = docView.posRect(codeSlab.modelData.end)
-                                return r.y + r.height - y + 20
+                                return r.y + r.height - y + 12
                             }
                         }
                     }
