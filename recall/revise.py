@@ -221,7 +221,10 @@ class Reviser(QObject):
         args = ["-p", prompt,
                 "--mcp-config", json.dumps(client_config()),
                 "--strict-mcp-config",           # don't load other MCP servers' tools
-                "--tools", *CLI_TOOLS,           # only these two tool definitions
+                # --tools filters the *built-in* set only (MCP tool names there
+                # would leave the agent with no tools at all); "" drops every
+                # built-in so the MCP config below is the whole toolset
+                "--tools", "",
                 "--allowedTools", ",".join(CLI_TOOLS),
                 "--max-turns", "8",
                 "--model", self.model(),
