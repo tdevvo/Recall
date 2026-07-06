@@ -43,12 +43,26 @@ class DocTreeModel(QAbstractItemModel):
             node.title = d["title"]
             self._by_id[node.id] = node
             parked.append(node)
+        # cycle guard: a node whose ancestor chain leads back to itself would
+        # drop out of the tree entirely (unreachable from the root) — park it
+        # at the root instead so corrupt data stays visible
+        pid_of = {d["id"]: d["parent_id"] for d in docs}
+
+        def in_cycle(node_id, pid):
+            seen = set()
+            while pid is not None and pid not in seen:
+                if pid == node_id:
+                    return True
+                seen.add(pid)
+                pid = pid_of.get(pid)
+            return False
+
         for d, node in zip(docs, parked):
             pid = d["parent_id"]
             parent = self._root
             if pid is not None:
                 p = self._by_id.get(pid)
-                if p is not None and p is not node:
+                if p is not None and p is not node and not in_cycle(node.id, pid):
                     parent = p
             node.parent = parent
             node.row = len(parent.children)

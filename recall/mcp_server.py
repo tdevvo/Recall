@@ -19,8 +19,14 @@ def client_config():
     cmd = str(local) if local.exists() else shutil.which("recall-mcp")
     if cmd:
         return {"mcpServers": {"recall": {"command": cmd, "args": []}}}
-    return {"mcpServers": {"recall": {"command": sys.executable,
-                                      "args": ["-m", "recall.mcp_server"]}}}
+    # module fallback: the client spawns us from an arbitrary cwd, so the
+    # package's parent dir must be on the path or the import silently fails
+    # and the agent is left with no tools
+    return {"mcpServers": {"recall": {
+        "command": sys.executable,
+        "args": ["-m", "recall.mcp_server"],
+        "env": {"PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+    }}}
 
 
 def _tool(name, desc, props, required):

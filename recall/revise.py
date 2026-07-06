@@ -104,10 +104,15 @@ class Reviser(QObject):
     @Slot()
     def registerMcp(self):
         server = client_config()["mcpServers"]["recall"]
+        # -e is variadic and would swallow a following positional, so the
+        # name goes first and "--" terminates the env list
+        args = ["mcp", "add", "--scope", "user", "recall"]
+        for k, v in server.get("env", {}).items():
+            args += ["-e", f"{k}={v}"]  # e.g. the module fallback's PYTHONPATH
+        args += ["--", server["command"], *server["args"]]
         proc = QProcess(self)
         proc.finished.connect(lambda code, _s: self._on_register_done(proc, code))
-        proc.start(self._cli, ["mcp", "add", "--scope", "user", "recall", "--",
-                               server["command"], *server["args"]])
+        proc.start(self._cli, args)
 
     def _on_register_done(self, proc, code):
         err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
@@ -232,6 +237,7 @@ class Reviser(QObject):
                 "--output-format", "stream-json", "--verbose"]
         proc = QProcess(self)
         self._out_buf = ""
+        self._saw_recall_tool = False   # proof the agent actually edited
         proc.readyReadStandardOutput.connect(lambda: self._emit_stream(proc))
         # neutral cwd: don't adopt whatever project (CLAUDE.md, hooks) the app
         # happened to be launched from
@@ -263,11 +269,18 @@ class Reviser(QObject):
             t = msg.get("type")
             if t == "system" and msg.get("subtype") == "init":
                 self.outputLine.emit(f"session started · model {msg.get('model', '?')}")
+                bad = [s.get("name", "?") for s in msg.get("mcp_servers", [])
+                       if s.get("status") != "connected"]
+                if bad:
+                    self.outputLine.emit(
+                        f"⚠ MCP server failed to connect: {', '.join(bad)}")
             elif t == "assistant":
                 for b in msg.get("message", {}).get("content", []):
                     if b.get("type") == "text" and b.get("text", "").strip():
                         self.outputLine.emit(b["text"].strip())
                     elif b.get("type") == "tool_use":
+                        if b.get("name", "").startswith("mcp__recall__"):
+                            self._saw_recall_tool = True
                         args_s = json.dumps(b.get("input", {}), ensure_ascii=False)
                         if len(args_s) > 140:
                             args_s = args_s[:140] + "…"
@@ -284,6 +297,12 @@ class Reviser(QObject):
             if code != 0:
                 err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
                 raise RuntimeError((err.strip() or f"claude exited with code {code}")[:300])
+            if not self._saw_recall_tool:
+                # exit 0 but the Recall tools were never called — usually the
+                # MCP server failed to start; don't clear the requests or the
+                # no-op would masquerade as a successful revision
+                raise RuntimeError("Claude finished without editing the document "
+                                   "— check the console for MCP server errors")
             # the agent edited + resolved via MCP; clear anything it left behind
             for c in self._store.list_clarifications(doc_id):
                 self._store.resolveClarification(c["id"])

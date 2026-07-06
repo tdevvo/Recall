@@ -162,6 +162,12 @@ class Highlighter(QObject):
                         QTextCursor(block).mergeBlockFormat(nbf)
             block = block.next()
         if run is not None:
+            # run ends at the document's last block: give it the same bottom
+            # margin as the in-loop close, or the slab overdraws past the text
+            if prev_code_block.blockFormat().bottomMargin() != CODE_MARGIN:
+                nbf = QTextBlockFormat()
+                nbf.setBottomMargin(CODE_MARGIN)
+                QTextCursor(prev_code_block).mergeBlockFormat(nbf)
             runs.append({"start": run["start"], "end": run["end"],
                          "text": "\n".join(run["lines"])})
         return runs

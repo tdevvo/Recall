@@ -236,6 +236,20 @@ class Store(QObject):
 
     def update_document(self, doc_id, fields):
         """Returns (ok, error). Only provided fields change."""
+        if fields.get("parent_id") is not None:
+            # a document reparented under itself or a descendant becomes
+            # unreachable from the tree root; walk up from the new parent
+            # (visited-set guards against already-corrupt chains)
+            pid, seen = fields["parent_id"], set()
+            while pid is not None and pid not in seen:
+                if pid == doc_id:
+                    return False, "parent_id would create a cycle"
+                seen.add(pid)
+                row = self._db.execute(
+                    "SELECT parent_id FROM documents WHERE id = ?", (pid,)).fetchone()
+                if row is None:
+                    break  # unknown parent: the FK constraint reports it
+                pid = row[0]
         sets, binds = [], []
         for key in ("title", "content", "parent_id"):
             if key in fields:
