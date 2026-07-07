@@ -11,16 +11,20 @@ from .store import Store, default_db_path
 
 def client_config():
     """MCP client config that runs *this* package as the server via the current
-    interpreter (`python -m recall.mcp_server`), with the package's parent dir on
-    PYTHONPATH so the import works from any cwd. This deliberately avoids the
-    `recall-mcp` console script: a stale or broken script (e.g. left over from an
-    old `pip install` after the source moved) would fail to launch, and the module
-    form guarantees the agent gets the same code — and tools — as the running app."""
+    interpreter. The package's directory is baked into the command with `python -c`
+    rather than left to PYTHONPATH: the client spawns the server from its own
+    working directory (often the home dir), where a plain `-m recall.mcp_server`
+    fails with ModuleNotFoundError unless PYTHONPATH is honoured — which is not
+    reliable. Embedding sys.path.insert in the argv makes the import work from any
+    cwd and any environment, while still running the live source (same code and
+    tools as the app), no install or console script required."""
     from pathlib import Path
+    pkg_parent = str(Path(__file__).resolve().parent.parent)
+    boot = ("import sys; sys.path.insert(0, %r); "
+            "from recall.mcp_server import main; sys.exit(main())" % pkg_parent)
     return {"mcpServers": {"recall": {
         "command": sys.executable,
-        "args": ["-m", "recall.mcp_server"],
-        "env": {"PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+        "args": ["-c", boot],
     }}}
 
 
@@ -211,7 +215,7 @@ def main():
             if method == "initialize":
                 _reply(msg_id, {
                     "protocolVersion": msg.get("params", {}).get("protocolVersion", "2024-11-05"),
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "recall", "version": "1.0"}})
             elif method == "tools/list":
                 _reply(msg_id, {"tools": TOOLS})
