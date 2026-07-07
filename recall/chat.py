@@ -69,7 +69,9 @@ class ChatAgent(QObject):
         self._busy = False
         self._session_id = ""
         self._out_buf = ""
+        self._err_full = ""
         self._proc = None
+        self._probed = False
 
     @Slot(result=bool)
     def available(self):
@@ -148,7 +150,10 @@ class ChatAgent(QObject):
         proc.setProcessEnvironment(cli_process_env(self._cli))
         self._proc = proc
         self._out_buf = ""
+        self._err_full = ""
+        self._probed = False
         proc.readyReadStandardOutput.connect(lambda: self._emit_stream(proc))
+        proc.readyReadStandardError.connect(lambda: self._drain_stderr(proc))
         # neutral cwd: don't adopt whatever project (CLAUDE.md, hooks) the app
         # happened to be launched from
         proc.setWorkingDirectory(os.path.expanduser("~"))
@@ -162,6 +167,70 @@ class ChatAgent(QObject):
         self.turnStarted.emit()
         proc.start(self._cli, args)
         watchdog.start()
+
+    def _drain_stderr(self, proc):
+        """claude logs MCP connection problems (and its own errors) to stderr;
+        keep the whole thing for the failure message and surface the telling
+        lines to the Activity log so a failed connection isn't a black box."""
+        chunk = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+        self._err_full += chunk
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if any(k in low for k in ("mcp", "error", "fail", "exception",
+                                      "traceback", "refused", "enoent", "no module")):
+                self.toolActivity.emit("⚙ " + self._short(line, 4000))
+
+    def _probe_mcp(self):
+        """Run the exact configured MCP server command once and report, in the
+        Activity log, whether it starts and answers — and if not, the stderr it
+        produced (the real reason: a bad interpreter, missing PySide6, an import
+        error, …). This is what turns 'failed to connect' into an actionable
+        message."""
+        cfg = client_config().get("mcpServers", {}).get("recall", {})
+        cmd, cmd_args = cfg.get("command", ""), cfg.get("args", [])
+        self.toolActivity.emit("⚙ MCP self-test: " + self._short(
+            " ".join([cmd, *cmd_args]), 4000))
+        p = QProcess(self)
+        env = cli_process_env(self._cli)
+        for k, v in (cfg.get("env") or {}).items():
+            env.insert(k, v)
+        p.setProcessEnvironment(env)
+        p.setWorkingDirectory(os.path.expanduser("~"))
+        state = {"out": "", "err": "", "answered": False}
+
+        def on_out():
+            state["out"] += bytes(p.readAllStandardOutput()).decode("utf-8", "replace")
+            if not state["answered"] and '"result"' in state["out"]:
+                state["answered"] = True
+                self.toolActivity.emit("⚙ MCP self-test: OK — the server started and "
+                                       "answered initialize.")
+                p.kill()
+
+        def on_err():
+            state["err"] += bytes(p.readAllStandardError()).decode("utf-8", "replace")
+
+        def on_fin(code, _status):
+            if not state["answered"]:
+                reason = state["err"].strip() or f"no response (exit {code})"
+                self.toolActivity.emit("⚙ MCP self-test FAILED: " + self._short(reason, 4000))
+            p.deleteLater()
+
+        p.readyReadStandardOutput.connect(on_out)
+        p.readyReadStandardError.connect(on_err)
+        p.finished.connect(on_fin)
+        p.start(cmd, cmd_args)
+        if p.waitForStarted(3000):
+            req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                              "params": {"protocolVersion": "2024-11-05",
+                                         "capabilities": {}}}) + "\n"
+            p.write(req.encode())
+        else:
+            self.toolActivity.emit("⚙ MCP self-test FAILED: could not start command "
+                                   f"'{cmd}' — check it exists and is executable.")
+            p.kill()
 
     @staticmethod
     def _short(text, limit):
@@ -201,7 +270,11 @@ class ChatAgent(QObject):
                 bad = [s.get("name", "?") for s in msg.get("mcp_servers", [])
                        if s.get("status") != "connected"]
                 if bad:
-                    self.note.emit(f"! MCP server failed to connect: {', '.join(bad)}")
+                    self.note.emit(f"! MCP server failed to connect: {', '.join(bad)} — "
+                                   "the assistant has no wiki tools this turn")
+                    if not self._probed:
+                        self._probed = True  # run the diagnostic once per turn
+                        self._probe_mcp()
             elif t == "assistant":
                 for b in msg.get("message", {}).get("content", []):
                     bt = b.get("type")
@@ -218,7 +291,10 @@ class ChatAgent(QObject):
                 for b in msg.get("message", {}).get("content", []):
                     if isinstance(b, dict) and b.get("type") == "tool_result":
                         out = self._result_text(b).strip()
-                        if out:
+                        if b.get("is_error"):
+                            self.toolActivity.emit("   ✗ error: "
+                                                   + self._short(out or "(no detail)", 4000))
+                        elif out:
                             self.toolActivity.emit("   ↳ " + self._short(out, 4000))
             elif t == "result":
                 self.note.emit(f"— finished in {msg.get('duration_ms', 0) / 1000:.0f}s —")
@@ -229,7 +305,7 @@ class ChatAgent(QObject):
     def _on_done(self, proc, code):
         try:
             if code != 0:
-                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+                err = self._err_full + bytes(proc.readAllStandardError()).decode("utf-8", "replace")
                 raise RuntimeError((err.strip() or f"claude exited with code {code}")[:300])
         except Exception as e:  # noqa: BLE001 — single funnel to the UI
             print(f"chat failed: {e}", file=sys.stderr)

@@ -2129,6 +2129,7 @@ ApplicationWindow {
                         readonly property bool isTool: (model.tool || "") !== ""
                         readonly property bool isErr: model.kind === "error"
                                                     || model.text.indexOf("!") === 0
+                                                    || model.text.indexOf("✗") >= 0
                         // tool results are the indented "↳" lines; dim them a touch
                         readonly property bool isResult: model.text.indexOf("↳") === 0
                                                        || model.text.indexOf("   ↳") === 0
@@ -2223,9 +2224,14 @@ ApplicationWindow {
             Qt.callLater(win.techScrollEnd)
         }
         function onErrorOccurred(message) {
-            // failures stay in the conversation so they're not missed
-            chatModel.append({ kind: "error", text: message })
+            // technical detail belongs in Activity; the chat gets only a short,
+            // non-technical pointer so the reply area stays clean
+            techModel.append({ kind: "error", tool: "", text: "✗ " + message })
+            chatModel.append({ kind: "error",
+                              text: "⚠ Something went wrong — see the Activity panel for details." })
+            win.activityPinned = true
             win.chatBusy = false
+            Qt.callLater(win.techScrollEnd)
             Qt.callLater(win.chatScrollEnd)
         }
     }
