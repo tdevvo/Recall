@@ -2532,9 +2532,25 @@ ApplicationWindow {
                         highlighted: true
                         onClicked: {
                             registerBtn.enabled = false
+                            deregisterBtn.enabled = false
+                            registerStatus.text = "Registering…"
+                            registerStatus.color = "#607d8b"
                             reviser.registerMcp()
                         }
-                        HoverTip { text: "Runs: claude mcp add --scope user recall — makes these tools available in your own Claude Code sessions" }
+                        HoverTip { text: "Runs: claude mcp remove then add --scope user recall — installs the current config for your own Claude Code sessions" }
+                    }
+                    Button {
+                        id: deregisterBtn
+                        text: "Deregister"
+                        font.capitalization: Font.MixedCase
+                        onClicked: {
+                            registerBtn.enabled = false
+                            deregisterBtn.enabled = false
+                            registerStatus.text = "Deregistering…"
+                            registerStatus.color = "#607d8b"
+                            reviser.deregisterMcp()
+                        }
+                        HoverTip { text: "Runs: claude mcp remove --scope user recall — removes the registration so you can add it again cleanly" }
                     }
                     Label {
                         id: registerStatus
@@ -2546,6 +2562,7 @@ ApplicationWindow {
                         target: reviser
                         function onRegisterResult(ok, message) {
                             registerBtn.enabled = true
+                            deregisterBtn.enabled = true
                             registerStatus.text = message
                             registerStatus.color = ok ? "#2e7d32" : "#c62828"
                         }

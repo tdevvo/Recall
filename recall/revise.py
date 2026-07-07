@@ -168,6 +168,24 @@ class Reviser(QObject):
         rm.finished.connect(after)
         rm.start(self._cli, ["mcp", "remove", "--scope", "user", "recall"])
 
+    @Slot()
+    def deregisterMcp(self):
+        proc = QProcess(self)
+        proc.setProcessEnvironment(cli_process_env(self._cli))
+        proc.finished.connect(lambda code, _s: self._on_deregister_done(proc, code))
+        proc.start(self._cli, ["mcp", "remove", "--scope", "user", "recall"])
+
+    def _on_deregister_done(self, proc, code):
+        err = bytes(proc.readAllStandardError()).decode("utf-8", "replace")
+        low = err.lower()
+        if code == 0:
+            self.registerResult.emit(True, "Deregistered ✓")
+        elif "no " in low or "not found" in low or "does not exist" in low:
+            self.registerResult.emit(True, "Not registered")
+        else:
+            self.registerResult.emit(False, (err.strip() or "deregister failed")[:200])
+        proc.deleteLater()
+
     def _register_add(self):
         server = client_config()["mcpServers"]["recall"]
         # -e is variadic and would swallow a following positional, so the
