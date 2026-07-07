@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, QUrl, Slot
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QIcon,
                            QTextBlockFormat, QTextCharFormat, QTextCursor,
-                           QTextFormat)
+                           QTextDocument, QTextFormat)
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
@@ -99,6 +99,25 @@ class Highlighter(QObject):
     @Slot(str)
     def copy(self, text):
         QGuiApplication.clipboard().setText(text)
+
+    @Slot("QVariant", int, int, str)
+    def copyAsMarkdown(self, quick_doc, start, end, full_source):
+        """Copy the selection to the clipboard as Markdown *source* (not the
+        rendered text), so pasting into another document/template reproduces the
+        original formatting. Selecting the whole document copies the exact source;
+        a partial selection is round-tripped back to Markdown."""
+        doc = quick_doc.textDocument()
+        total = max(0, doc.characterCount() - 1)
+        if start <= 0 and end >= total:
+            md = full_source
+        else:
+            cur = QTextCursor(doc)
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.KeepAnchor)
+            tmp = QTextDocument()
+            QTextCursor(tmp).insertFragment(cur.selection())
+            md = tmp.toMarkdown().rstrip("\n")
+        QGuiApplication.clipboard().setText(md)
 
     @staticmethod
     def _style_blocks(doc):

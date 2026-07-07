@@ -10,18 +10,13 @@ from .store import Store, default_db_path
 
 
 def client_config():
-    """MCP client config for this install: the recall-mcp console script from
-    this environment (venv/pipx), falling back to PATH. An absolute path —
-    clients spawn the server from an arbitrary cwd with their own PATH."""
-    import shutil
+    """MCP client config that runs *this* package as the server via the current
+    interpreter (`python -m recall.mcp_server`), with the package's parent dir on
+    PYTHONPATH so the import works from any cwd. This deliberately avoids the
+    `recall-mcp` console script: a stale or broken script (e.g. left over from an
+    old `pip install` after the source moved) would fail to launch, and the module
+    form guarantees the agent gets the same code — and tools — as the running app."""
     from pathlib import Path
-    local = Path(sys.executable).parent / "recall-mcp"
-    cmd = str(local) if local.exists() else shutil.which("recall-mcp")
-    if cmd:
-        return {"mcpServers": {"recall": {"command": cmd, "args": []}}}
-    # module fallback: the client spawns us from an arbitrary cwd, so the
-    # package's parent dir must be on the path or the import silently fails
-    # and the agent is left with no tools
     return {"mcpServers": {"recall": {
         "command": sys.executable,
         "args": ["-m", "recall.mcp_server"],
@@ -62,6 +57,17 @@ TOOLS = [
           {"id": _ID, "title": _TITLE, "content": _CONTENT, "parent_id": _PARENT}, ["id"]),
     _tool("delete_document", "Delete a document and all of its descendants.",
           {"id": _ID}, ["id"]),
+    _tool("set_template",
+          "Move a document into the Templates category, or move a template back to a "
+          "normal document, by flipping its type. 'Template' is a type flag on the "
+          "document itself — NOT a folder — so to make something a template you set its "
+          "type here rather than creating a 'Templates' parent and reparenting under it. "
+          "The document and its whole sub-tree move together and the moved item becomes "
+          "top-level in its new tree.",
+          {"id": _ID,
+           "is_template": {"type": "boolean",
+                           "description": "true = make it a template; false = make it a normal document"}},
+          ["id", "is_template"]),
     _tool("search", "Full-text search over titles and content. Returns matches with snippets.",
           {"query": {"type": "string"}}, ["query"]),
     _tool("list_templates",
@@ -131,6 +137,13 @@ def call_tool(store, name, args):
         if not ok:
             return _text_result("delete failed: " + err, True)
         return _text_result("ok")
+    if name == "set_template":
+        if "is_template" not in args:
+            return _text_result("missing required argument: is_template", True)
+        ok, err = store.set_document_template(int(args.get("id", 0)), bool(args["is_template"]))
+        if not ok:
+            return _text_result("set_template failed: " + err, True)
+        return _text_result("ok")
     if name == "list_templates":
         return _text_result(_dumps_pretty(store.list_templates()))
     if name == "read_template":
@@ -179,21 +192,30 @@ def main():
         is_notification = "id" not in msg
         msg_id = msg.get("id")
 
-        if method == "initialize":
-            _reply(msg_id, {
-                "protocolVersion": msg.get("params", {}).get("protocolVersion", "2024-11-05"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "recall", "version": "1.0"}})
-        elif method == "tools/list":
-            _reply(msg_id, {"tools": TOOLS})
-        elif method == "tools/call":
-            params = msg.get("params", {})
-            _reply(msg_id, call_tool(store, params.get("name", ""),
-                                     params.get("arguments", {}) or {}))
-        elif method == "ping":
-            _reply(msg_id, {})
-        elif not is_notification:
-            _reply_error(msg_id, -32601, "method not found: " + method)
+        # a single failing request must never take the whole server down —
+        # otherwise the first bad tool call disconnects the agent for the rest
+        # of the session ("works for a call or two, then fails")
+        try:
+            if method == "initialize":
+                _reply(msg_id, {
+                    "protocolVersion": msg.get("params", {}).get("protocolVersion", "2024-11-05"),
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "recall", "version": "1.0"}})
+            elif method == "tools/list":
+                _reply(msg_id, {"tools": TOOLS})
+            elif method == "tools/call":
+                params = msg.get("params", {})
+                _reply(msg_id, call_tool(store, params.get("name", ""),
+                                         params.get("arguments", {}) or {}))
+            elif method == "ping":
+                _reply(msg_id, {})
+            elif not is_notification:
+                _reply_error(msg_id, -32601, "method not found: " + method)
+        except Exception as e:  # noqa: BLE001 — keep serving after any single failure
+            print(f"recall-mcp: {method} failed: {e}", file=sys.stderr)
+            if not is_notification:
+                # report it as a tool error so the agent can react and retry
+                _reply(msg_id, _text_result(f"internal error: {e}", True))
     return 0
 
 

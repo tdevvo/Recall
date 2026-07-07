@@ -61,6 +61,19 @@ def test_store(tmp):
     assert any(t["id"] == tmpl_id for t in store.list_templates())
     assert not any(h["id"] == tmpl_id for h in store.search("kebab")), "templates excluded from search"
 
+    # moving a normal document into the Templates category (with a child subtree)
+    parent_doc, _ = store.create_document("Movable", "top", None)
+    child_doc, _ = store.create_document("Movable child", "under", parent_doc)
+    ok, err = store.set_document_template(parent_doc, True)
+    assert ok, err
+    tids = {t["id"] for t in store.list_templates()}
+    assert parent_doc in tids and child_doc in tids, "subtree moved to templates"
+    assert not any(d["id"] in (parent_doc, child_doc) for d in store.list_documents())
+    assert store.getDocument(parent_doc)["parent_id"] is None, "moved root detached to top level"
+    # and back again
+    assert store.set_document_template(parent_doc, False)[0]
+    assert any(d["id"] == parent_doc for d in store.list_documents())
+
 
 def test_mcp(tmp):
     env = dict(os.environ, XDG_DATA_HOME=tmp)
@@ -79,7 +92,7 @@ def test_mcp(tmp):
                          check=True).stdout.splitlines()
     replies = {json.loads(l)["id"]: json.loads(l) for l in out}
     assert replies[1]["result"]["serverInfo"]["name"] == "recall"
-    assert len(replies[2]["result"]["tools"]) == 10
+    assert len(replies[2]["result"]["tools"]) == 11
     assert "created document" in replies[3]["result"]["content"][0]["text"]
     # snippet() bolds the match: "<b>mcp</b> test body"
     assert "test body" in replies[4]["result"]["content"][0]["text"]

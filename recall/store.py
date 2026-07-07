@@ -351,6 +351,41 @@ class Store(QObject):
         self.changed.emit()
         return True, ""
 
+    @Slot(int, bool, result=bool)
+    def setDocumentTemplate(self, doc_id, is_template):
+        ok, _ = self.set_document_template(doc_id, is_template)
+        return ok
+
+    def set_document_template(self, doc_id, is_template):
+        """Move a document between the document tree and the template tree by
+        flipping its is_template flag. The whole subtree moves together (so its
+        internal structure is preserved), and the moved root is detached to the
+        top level of its new tree. Returns (ok, error)."""
+        if self._db.execute("SELECT id FROM documents WHERE id = ?",
+                            (doc_id,)).fetchone() is None:
+            return False, f"document {doc_id} not found"
+        val = 1 if is_template else 0
+        # collect the subtree (root + all descendants), breadth-first
+        ids, frontier = [doc_id], [doc_id]
+        while frontier:
+            ph = ",".join("?" * len(frontier))
+            kids = [r[0] for r in self._db.execute(
+                f"SELECT id FROM documents WHERE parent_id IN ({ph})", frontier).fetchall()]
+            ids.extend(kids)
+            frontier = kids
+        try:
+            ph = ",".join("?" * len(ids))
+            self._db.execute(
+                f"UPDATE documents SET is_template = ?, updated_at = datetime('now')"
+                f" WHERE id IN ({ph})", (val, *ids))
+            # detach the moved root: its old parent is in the other tree, so leaving
+            # the link would park it at the root anyway — make that explicit
+            self._db.execute("UPDATE documents SET parent_id = NULL WHERE id = ?", (doc_id,))
+        except sqlite3.Error as e:
+            return False, str(e)
+        self.changed.emit()
+        return True, ""
+
     def delete_document(self, doc_id):
         """Returns (ok, error)."""
         try:

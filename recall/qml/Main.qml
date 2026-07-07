@@ -854,6 +854,13 @@ ApplicationWindow {
                                     enabled: !win.editing
                                     onTriggered: win.startEdit(treeRow.model.docId)
                                 }
+                                MenuSeparator {}
+                                MenuItem {
+                                    text: win.templateMode ? "Move to Documents" : "Move to Templates"
+                                    enabled: !win.editing
+                                    onTriggered: store.setDocumentTemplate(
+                                        treeRow.model.docId, !win.templateMode)
+                                }
                             }
 
                             // rows slide down and fade in when revealed by expanding their parent
@@ -1133,6 +1140,20 @@ ApplicationWindow {
                     selectByMouse: true
                     persistentSelection: true // keep selection while the clarify popup has focus
                     wrapMode: TextEdit.Wrap
+                    // native raster glyphs: the default distance-field atlas drops
+                    // runs of a tall TextEdit when scrolled off and back into view
+                    // (blank gaps), especially on software/no-GPU backends
+                    renderType: Text.NativeRendering
+                    // Ctrl+C copies Markdown source, not rendered text, so pasting
+                    // into another document keeps the formatting intact
+                    Keys.onPressed: function (e) {
+                        if ((e.modifiers & Qt.ControlModifier) && e.key === Qt.Key_C
+                                && selectedText.length > 0) {
+                            highlighter.copyAsMarkdown(textDocument, selectionStart,
+                                                       selectionEnd, win.docContent)
+                            e.accepted = true
+                        }
+                    }
                     // ponytail: crude content-type sniff — leading '<' means raw HTML, else Markdown
                     textFormat: win.docContent.trim().startsWith("<") ? TextEdit.RichText
                                                                       : TextEdit.MarkdownText
@@ -1245,6 +1266,19 @@ ApplicationWindow {
                     }
                     Menu {
                         id: docMenu
+                        MenuItem {
+                            text: "Copy (keep formatting)"
+                            enabled: docView.selectedText.length > 0
+                            onTriggered: highlighter.copyAsMarkdown(
+                                docView.textDocument, docView.selectionStart,
+                                docView.selectionEnd, win.docContent)
+                        }
+                        MenuItem {
+                            text: "Select all"
+                            enabled: win.currentDocId > 0
+                            onTriggered: docView.selectAll()
+                        }
+                        MenuSeparator {}
                         MenuItem {
                             text: "Edit"
                             enabled: win.currentDocId > 0 && !win.editing
@@ -1874,51 +1908,61 @@ ApplicationWindow {
                         anchors.bottomMargin: 4
                         spacing: 6
 
-                        // bare TextArea (no ScrollView): grows with content up to a
-                        // cap, then scrolls internally without a visible scrollbar
-                        TextArea {
-                            id: chatInput
+                        // ScrollView caps the height and scrolls internally with the
+                        // scrollbar hidden, so long input scrolls instead of spilling
+                        // out of the field
+                        ScrollView {
+                            id: chatInputScroll
                             Layout.fillWidth: true
                             Layout.maximumHeight: 120
-                            enabled: (chat && chat.available()) && !win.chatBusy
-                            wrapMode: TextArea.Wrap
-                            background: null
-                            font.pixelSize: 13
-                            placeholderText: (chat && chat.available()) ? "Ask the assistant…  (@ to reference a document · Enter to send · Shift+Enter for a new line)"
-                                                               : "Claude Code CLI required for chat"
-                            onTextChanged: win.refreshMentions()
-                            onCursorPositionChanged: win.refreshMentions()
-                            Keys.onReturnPressed: function (event) {
-                                if (mentionPop.visible) {
-                                    event.accepted = true
-                                    mentionList.acceptCurrent()
-                                } else if (event.modifiers & Qt.ShiftModifier) {
-                                    event.accepted = false // newline
-                                } else {
-                                    event.accepted = true
-                                    win.sendChat()
+                            Layout.alignment: Qt.AlignVCenter
+                            clip: true
+                            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                            TextArea {
+                                id: chatInput
+                                width: chatInputScroll.availableWidth
+                                enabled: (chat && chat.available()) && !win.chatBusy
+                                wrapMode: TextArea.Wrap
+                                background: null
+                                font.pixelSize: 13
+                                placeholderText: (chat && chat.available()) ? "Ask the assistant…  (@ to reference a document · Enter to send · Shift+Enter for a new line)"
+                                                                   : "Claude Code CLI required for chat"
+                                onTextChanged: win.refreshMentions()
+                                onCursorPositionChanged: win.refreshMentions()
+                                Keys.onReturnPressed: function (event) {
+                                    if (mentionPop.visible) {
+                                        event.accepted = true
+                                        mentionList.acceptCurrent()
+                                    } else if (event.modifiers & Qt.ShiftModifier) {
+                                        event.accepted = false // newline
+                                    } else {
+                                        event.accepted = true
+                                        win.sendChat()
+                                    }
                                 }
-                            }
-                            Keys.onEnterPressed: function (event) {
-                                if (mentionPop.visible) {
-                                    event.accepted = true
-                                    mentionList.acceptCurrent()
-                                } else {
-                                    event.accepted = true
-                                    win.sendChat()
+                                Keys.onEnterPressed: function (event) {
+                                    if (mentionPop.visible) {
+                                        event.accepted = true
+                                        mentionList.acceptCurrent()
+                                    } else {
+                                        event.accepted = true
+                                        win.sendChat()
+                                    }
                                 }
-                            }
-                            Keys.onUpPressed: function (event) {
-                                if (mentionPop.visible) { event.accepted = true; mentionList.moveUp() }
-                                else event.accepted = false
-                            }
-                            Keys.onDownPressed: function (event) {
-                                if (mentionPop.visible) { event.accepted = true; mentionList.moveDown() }
-                                else event.accepted = false
-                            }
-                            Keys.onEscapePressed: function (event) {
-                                if (mentionPop.visible) { event.accepted = true; mentionPop.close() }
-                                else event.accepted = false
+                                Keys.onUpPressed: function (event) {
+                                    if (mentionPop.visible) { event.accepted = true; mentionList.moveUp() }
+                                    else event.accepted = false
+                                }
+                                Keys.onDownPressed: function (event) {
+                                    if (mentionPop.visible) { event.accepted = true; mentionList.moveDown() }
+                                    else event.accepted = false
+                                }
+                                Keys.onEscapePressed: function (event) {
+                                    if (mentionPop.visible) { event.accepted = true; mentionPop.close() }
+                                    else event.accepted = false
+                                }
                             }
                         }
 
