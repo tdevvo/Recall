@@ -124,6 +124,10 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 width: 15
                 height: 15
+                // raster render target + synchronous paint so it draws on the
+                // software backend (no GL), where the default FBO target is blank
+                renderTarget: Canvas.Image
+                renderStrategy: Canvas.Immediate
                 property color tint: copyIcon.done ? "#2e7d32"
                                    : copyIcon.hovered ? "#3949ab" : "#78909c"
                 onTintChanged: requestPaint()
@@ -504,43 +508,38 @@ ApplicationWindow {
                      : chatToggleBtn.down ? "#c5cae9"
                      : chatToggleBtn.hovered ? "#dde1f1" : "transparent"
             }
-            // drawn speech bubble instead of an emoji glyph, which needs a
-            // colour-emoji font that isn't guaranteed to be installed
+            // speech bubble drawn with plain Rectangles rather than a Canvas or an
+            // emoji glyph: Canvas needs a GPU/GL backend that some Linux setups
+            // (software renderer, headless VMs) lack, which left the icon invisible
             contentItem: Item {
-                Canvas {
+                Item {
+                    id: chatIcon
                     width: 24
                     height: 24
                     anchors.centerIn: parent
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        ctx.reset()
-                        ctx.fillStyle = "#3949ab"
-                        var x = 2, y = 3, w = 20, h = 15, r = 5
-                        ctx.beginPath()
-                        ctx.moveTo(x + r, y)
-                        ctx.lineTo(x + w - r, y)
-                        ctx.arcTo(x + w, y, x + w, y + r, r)
-                        ctx.lineTo(x + w, y + h - r)
-                        ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
-                        ctx.lineTo(x + r, y + h)
-                        ctx.arcTo(x, y + h, x, y + h - r, r)
-                        ctx.lineTo(x, y + r)
-                        ctx.arcTo(x, y, x + r, y, r)
-                        ctx.closePath()
-                        ctx.fill()
-                        // tail at the bottom-left
-                        ctx.beginPath()
-                        ctx.moveTo(x + 4, y + h - 1)
-                        ctx.lineTo(x + 4, y + h + 5)
-                        ctx.lineTo(x + 10, y + h - 1)
-                        ctx.closePath()
-                        ctx.fill()
-                        // three dots
-                        ctx.fillStyle = "#ffffff"
-                        for (var i = 0; i < 3; i++) {
-                            ctx.beginPath()
-                            ctx.arc(x + 5 + i * 5, y + h / 2 - 1, 1.4, 0, 2 * Math.PI)
-                            ctx.fill()
+
+                    Rectangle {
+                        id: bubbleBody
+                        x: 2; y: 2
+                        width: 20; height: 15
+                        radius: 5
+                        color: "#3949ab"
+                    }
+                    // tail: a rotated square poking out of the bottom-left
+                    Rectangle {
+                        x: 5; y: 13
+                        width: 7; height: 7
+                        radius: 1
+                        rotation: 45
+                        color: "#3949ab"
+                    }
+                    Row {
+                        y: 7
+                        anchors.horizontalCenter: chatIcon.horizontalCenter
+                        spacing: 3
+                        Repeater {
+                            model: 3
+                            delegate: Rectangle { width: 3; height: 3; radius: 1.5; color: "white" }
                         }
                     }
                 }
@@ -894,6 +893,10 @@ ApplicationWindow {
                                 // next to the icon and label
                                 Canvas {
                                     anchors.fill: parent
+                                    // raster target so the arrow paints on the
+                                    // software backend (no GL), not just on GPU
+                                    renderTarget: Canvas.Image
+                                    renderStrategy: Canvas.Immediate
                                     rotation: treeRow.expanded ? 90 : 0
                                     Behavior on rotation {
                                         NumberAnimation { duration: 150; easing.type: Easing.OutCubic }

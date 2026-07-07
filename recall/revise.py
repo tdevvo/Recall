@@ -3,17 +3,68 @@
 #  - "claude-code": spawn the logged-in Claude Code CLI headless (subscription
 #    billing); it edits through our own MCP server, so the reader updates live.
 #  - "api": Anthropic Messages API via QtNetwork (needs an API key).
+import glob
 import json
 import os
 import shutil
 import sys
 
-from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal, Slot
+from PySide6.QtCore import (QObject, QProcess, QProcessEnvironment, QSettings,
+                            QTimer, Signal, Slot)
 from PySide6.QtNetwork import (QNetworkAccessManager, QNetworkReply,
                                QNetworkRequest)
 from PySide6.QtCore import QUrl
 
 from .mcp_server import client_config
+
+
+def find_claude_cli():
+    """Locate the `claude` CLI. shutil.which covers the common case, but a GUI
+    launched from a desktop shortcut (rather than a shell) often has a minimal
+    PATH that omits the directories Claude Code installs into, so fall back to
+    the well-known locations before giving up."""
+    cli = shutil.which("claude")
+    if cli:
+        return cli
+    home = os.path.expanduser("~")
+    cands = [
+        os.path.join(home, ".local", "bin", "claude"),     # native installer / pipx
+        os.path.join(home, ".claude", "local", "claude"),  # Claude Code local install
+        os.path.join(home, "bin", "claude"),
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+        "/opt/homebrew/bin/claude",                         # macOS (harmless elsewhere)
+        os.path.join(home, ".npm-global", "bin", "claude"),
+    ]
+    # version-managed node installs (nvm / fnm)
+    cands += glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin", "claude"))
+    cands += glob.glob(os.path.join(home, ".fnm", "node-versions", "*", "installation", "bin", "claude"))
+    for c in sorted(cands, reverse=True):
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def cli_process_env(cli_path):
+    """Process environment whose PATH includes the CLI's own directory and common
+    node locations, so a `claude` launcher found off-PATH can still find `node`
+    when the GUI itself was started with a stripped-down PATH."""
+    env = QProcessEnvironment.systemEnvironment()
+    current = env.value("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    home = os.path.expanduser("~")
+    extra = [os.path.dirname(cli_path)] if cli_path else []
+    extra += [os.path.join(home, ".local", "bin"), "/usr/local/bin", "/usr/bin"]
+    extra += [os.path.dirname(p) for p in
+              glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin", "node"))]
+    seen, merged = set(), []
+    for p in extra + parts:
+        if p and p not in seen:
+            seen.add(p)
+            merged.append(p)
+    env.insert("PATH", os.pathsep.join(merged))
+    return env
+
 
 API_URL = "https://api.anthropic.com/v1/messages"
 # sonnet: revisions are mechanical editing — opus quota is wasted on them
@@ -54,7 +105,7 @@ class Reviser(QObject):
         self._store = store
         self._nam = QNetworkAccessManager(self)
         self._busy = False
-        self._cli = shutil.which("claude")
+        self._cli = find_claude_cli()
         self._out_buf = ""
 
     # --- settings (env var wins; QSettings is the fallback) ---
@@ -111,6 +162,7 @@ class Reviser(QObject):
             args += ["-e", f"{k}={v}"]  # e.g. the module fallback's PYTHONPATH
         args += ["--", server["command"], *server["args"]]
         proc = QProcess(self)
+        proc.setProcessEnvironment(cli_process_env(self._cli))
         proc.finished.connect(lambda code, _s: self._on_register_done(proc, code))
         proc.start(self._cli, args)
 
@@ -236,6 +288,7 @@ class Reviser(QObject):
                 # line-delimited progress events for the in-app console
                 "--output-format", "stream-json", "--verbose"]
         proc = QProcess(self)
+        proc.setProcessEnvironment(cli_process_env(self._cli))
         self._out_buf = ""
         self._saw_recall_tool = False   # proof the agent actually edited
         proc.readyReadStandardOutput.connect(lambda: self._emit_stream(proc))

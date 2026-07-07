@@ -8,13 +8,12 @@
 # we also nudge the poll as the stream reports tool calls, so they show live.
 import json
 import os
-import shutil
 import sys
 
 from PySide6.QtCore import QObject, QProcess, QSettings, QTimer, Signal, Slot
 
 from .mcp_server import client_config
-from .revise import DEFAULT_MODEL
+from .revise import DEFAULT_MODEL, cli_process_env, find_claude_cli
 
 # the full recall toolset — chat can read, search and edit, unlike Revise which
 # only needs the two write tools
@@ -60,7 +59,7 @@ class ChatAgent(QObject):
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self._store = store
-        self._cli = shutil.which("claude")
+        self._cli = find_claude_cli()
         self._busy = False
         self._session_id = ""
         self._out_buf = ""
@@ -140,6 +139,7 @@ class ChatAgent(QObject):
             args += ["--resume", self._session_id]
 
         proc = QProcess(self)
+        proc.setProcessEnvironment(cli_process_env(self._cli))
         self._proc = proc
         self._out_buf = ""
         proc.readyReadStandardOutput.connect(lambda: self._emit_stream(proc))
