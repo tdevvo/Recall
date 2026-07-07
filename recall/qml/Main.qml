@@ -2125,8 +2125,10 @@ ApplicationWindow {
                         id: ev
                         required property var model
                         width: techList.width
-                        implicitHeight: evText.implicitHeight + 14
+                        implicitHeight: evCol.implicitHeight + 14
+                        readonly property bool isTool: (model.tool || "") !== ""
                         readonly property bool isErr: model.kind === "error"
+                                                    || model.text.indexOf("!") === 0
                         // tool results are the indented "↳" lines; dim them a touch
                         readonly property bool isResult: model.text.indexOf("↳") === 0
                                                        || model.text.indexOf("   ↳") === 0
@@ -2144,23 +2146,41 @@ ApplicationWindow {
                             width: 10
                             height: 10
                             radius: 5
-                            color: ev.isErr ? "#c62828" : ev.isResult ? "#b0bec5" : "#789098"
+                            color: ev.isErr ? "#c62828" : ev.isTool ? "#3949ab"
+                                            : ev.isResult ? "#b0bec5" : "#789098"
                             border.width: 2
                             border.color: "#eceff1"
                         }
-                        Label {
-                            id: evText
+                        Column {
+                            id: evCol
                             x: 32
                             y: 4
                             width: parent.width - 40
-                            text: ev.model.text
-                            wrapMode: Text.Wrap
-                            // truncate to a few lines unless the user expanded the log
-                            maximumLineCount: win.activityFull ? 100000 : 4
-                            elide: Text.ElideRight
-                            font.family: "monospace"
-                            font.pixelSize: 11
-                            color: ev.isErr ? "#c62828" : ev.isResult ? "#607d8b" : "#455a64"
+                            spacing: 2
+                            // the tool name, shown prominently so it's clear which
+                            // tool the agent called
+                            Label {
+                                visible: ev.isTool
+                                width: parent.width
+                                text: ev.model.tool
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                                color: "#283593"
+                                elide: Text.ElideRight
+                            }
+                            Label {
+                                visible: ev.model.text !== ""
+                                width: parent.width
+                                text: ev.model.text
+                                wrapMode: Text.Wrap
+                                // truncate to a few lines unless the user expanded the log
+                                maximumLineCount: win.activityFull ? 100000 : 4
+                                elide: Text.ElideRight
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                color: ev.isErr ? "#c62828" : ev.isResult ? "#607d8b" : "#455a64"
+                            }
                         }
                     }
                 }
@@ -2181,11 +2201,25 @@ ApplicationWindow {
         }
         // technical events go to the Activity timeline, not the conversation
         function onToolActivity(line) {
-            techModel.append({ kind: "tool", text: line })
+            // tool calls arrive as "• <name>  <args>"; split the name out so it
+            // can be shown prominently ("which tool was called")
+            if (line.indexOf("• ") === 0) {
+                var body = line.substring(2)
+                var sp = body.indexOf("  ")
+                var nm = sp >= 0 ? body.substring(0, sp) : body
+                var rest = sp >= 0 ? body.substring(sp + 2).trim() : ""
+                techModel.append({ kind: "tool", tool: nm, text: rest })
+            } else if (line.indexOf("thinking: ") === 0) {
+                techModel.append({ kind: "thinking", tool: "", text: line.substring(10) })
+            } else {
+                techModel.append({ kind: "tool", tool: "", text: line })
+            }
+            // keep the log open after the turn so the tool calls stay reviewable
+            win.activityPinned = true
             Qt.callLater(win.techScrollEnd)
         }
         function onNote(line) {
-            techModel.append({ kind: "note", text: line })
+            techModel.append({ kind: "note", tool: "", text: line })
             Qt.callLater(win.techScrollEnd)
         }
         function onErrorOccurred(message) {

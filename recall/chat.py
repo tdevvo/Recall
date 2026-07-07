@@ -23,6 +23,7 @@ CHAT_TOOLS = [
     "mcp__recall__create_document",
     "mcp__recall__update_document",
     "mcp__recall__delete_document",
+    "mcp__recall__set_template",
     "mcp__recall__search",
     "mcp__recall__list_clarifications",
     "mcp__recall__resolve_clarification",
@@ -39,6 +40,11 @@ CHAT_SYSTEM = (
     "describing them; consult the templates (list_templates / read_template) for "
     "the house style before writing. For questions that don't require edits, just "
     "answer.\n\n"
+    "To make a document a template (or turn a template back into a normal "
+    "document) use the set_template tool — that simply moves it between the "
+    "Documents and Templates sections. Do NOT emulate this by creating a "
+    "'Templates' parent document and reparenting under it; 'template' is a type "
+    "flag on the document, not a folder.\n\n"
     "Your chat replies are shown in a narrow chat panel, so write them as short, "
     "plain conversational prose — one to three sentences confirming what you did or "
     "answering the question. Do NOT use Markdown headings, tables, code fences or "
