@@ -159,6 +159,55 @@ ApplicationWindow {
         visible: parent.hovered && text !== ""
     }
 
+    // live "working" status while the agent runs: a pulsing dot and a
+    // shimmering, colour-shifting word that cycles (Thinking… / Inferring… /
+    // …), echoing the CLI spinner so it's clear the assistant is busy
+    component WorkingPulse: Row {
+        spacing: 8
+        property color base: "#3949ab"
+        property var words: ["Thinking", "Working", "Inferring", "Reasoning",
+                             "Reading", "Composing", "Pondering"]
+        property int wordIndex: 0
+
+        Timer {
+            running: win.chatBusy
+            interval: 2000
+            repeat: true
+            onTriggered: parent.wordIndex = (parent.wordIndex + 1) % parent.words.length
+        }
+
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: 9
+            height: 9
+            radius: 4.5
+            color: pulseWord.color
+            SequentialAnimation on scale {
+                running: win.chatBusy
+                loops: Animation.Infinite
+                NumberAnimation { from: 0.55; to: 1.0; duration: 650; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 1.0; to: 0.55; duration: 650; easing.type: Easing.InOutSine }
+            }
+        }
+
+        Label {
+            id: pulseWord
+            anchors.verticalCenter: parent.verticalCenter
+            text: parent.words[parent.wordIndex] + "…"
+            font.pixelSize: 13
+            font.italic: true
+            color: parent.base
+            // colour cycles through the accent palette while working
+            SequentialAnimation on color {
+                running: win.chatBusy
+                loops: Animation.Infinite
+                ColorAnimation { from: "#3949ab"; to: "#7e57c2"; duration: 900 }
+                ColorAnimation { from: "#7e57c2"; to: "#26a69a"; duration: 900 }
+                ColorAnimation { from: "#26a69a"; to: "#3949ab"; duration: 900 }
+            }
+        }
+    }
+
     component FmtButton: ToolButton {
         property string tip
         implicitWidth: 40
@@ -1872,22 +1921,15 @@ ApplicationWindow {
                     }
                 }
 
-                // "working" pulse while a turn is in flight
-                Label {
+                // live "working" status while a turn is in flight: cycling,
+                // colour-shifting word, always visible just above the input
+                WorkingPulse {
                     Layout.fillWidth: true
                     Layout.leftMargin: 16
                     Layout.topMargin: 2
                     Layout.bottomMargin: 2
                     visible: win.chatBusy
-                    text: "✦ Working…"
-                    font.pixelSize: 12
-                    color: "#3949ab"
-                    SequentialAnimation on opacity {
-                        running: win.chatBusy
-                        loops: Animation.Infinite
-                        NumberAnimation { from: 0.4; to: 1.0; duration: 600; easing.type: Easing.InOutSine }
-                        NumberAnimation { from: 1.0; to: 0.4; duration: 600; easing.type: Easing.InOutSine }
-                    }
+                    base: "#3949ab"
                 }
 
                 Rectangle {
@@ -2095,6 +2137,22 @@ ApplicationWindow {
                             onClicked: win.activityPinned = false
                             HoverTip { text: "Hide the activity log" }
                         }
+                    }
+                }
+
+                // working strip: the same shimmering status while the agent runs
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: win.chatBusy ? 30 : 0
+                    visible: win.chatBusy
+                    clip: true
+                    color: "#e1e6e9"
+                    Behavior on implicitHeight { NumberAnimation { duration: 200 } }
+                    WorkingPulse {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 14
+                        anchors.verticalCenter: parent.verticalCenter
+                        base: "#455a64"
                     }
                 }
 
