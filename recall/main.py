@@ -10,6 +10,7 @@ from PySide6.QtGui import (QColor, QFont, QGuiApplication, QIcon,
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
+from . import __version__
 from .chat import ChatAgent
 from .doctreemodel import DocTreeModel
 from .mcp_server import TOOLS, client_config
@@ -219,6 +220,7 @@ def main():
     chat = ChatAgent(store)
 
     engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("appVersion", __version__)
     engine.rootContext().setContextProperty("store", store)
     engine.rootContext().setContextProperty("docModel", model)
     engine.rootContext().setContextProperty("templateModel", template_model)

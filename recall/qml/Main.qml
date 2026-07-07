@@ -7,7 +7,7 @@ ApplicationWindow {
     width: 1200
     height: 800
     visible: true
-    title: "Recall"
+    title: "Recall  ·  v" + (typeof appVersion !== "undefined" ? appVersion : "?")
     // no WindowSystemMenuHint: drops the titlebar icon's options menu
     // (WM-controlled — KWin on Wayland may ignore it)
     flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
@@ -374,7 +374,7 @@ ApplicationWindow {
 
     function sendChat() {
         var t = chatInput.text.trim()
-        if (t === "" || win.chatBusy || !chat.available())
+        if (t === "" || win.chatBusy || !(chat && chat.available()))
             return
         mentionPop.close()
         chatModel.append({ kind: "user", text: t })
@@ -461,12 +461,23 @@ ApplicationWindow {
     header: ToolBar {
         Material.elevation: 2
         Label {
+            id: appTitleLabel
             text: "Recall"
             font.pixelSize: 20
             font.weight: Font.Medium
             anchors.left: parent.left
             anchors.leftMargin: 16
             anchors.verticalCenter: parent.verticalCenter
+        }
+        // visible version marker: confirms which build is running even when the
+        // window manager hides the title bar
+        Label {
+            text: "v" + (typeof appVersion !== "undefined" ? appVersion : "?")
+            font.pixelSize: 12
+            opacity: 0.6
+            anchors.left: appTitleLabel.right
+            anchors.leftMargin: 8
+            anchors.baseline: appTitleLabel.baseline
         }
         ToolButton {
             id: menuBtn
@@ -1718,7 +1729,7 @@ ApplicationWindow {
                         wrapMode: Text.Wrap
                         opacity: 0.6
                         font.pixelSize: 13
-                        text: chat.available()
+                        text: (chat && chat.available())
                               ? "Ask me to add or update documentation, or to look something up — I edit the wiki live as we talk. Type @ to reference a document."
                               : "Chat needs the Claude Code CLI. Install it and log in, then reopen this panel."
                     }
@@ -1869,11 +1880,11 @@ ApplicationWindow {
                             id: chatInput
                             Layout.fillWidth: true
                             Layout.maximumHeight: 120
-                            enabled: chat.available() && !win.chatBusy
+                            enabled: (chat && chat.available()) && !win.chatBusy
                             wrapMode: TextArea.Wrap
                             background: null
                             font.pixelSize: 13
-                            placeholderText: chat.available() ? "Ask the assistant…  (@ to reference a document · Enter to send · Shift+Enter for a new line)"
+                            placeholderText: (chat && chat.available()) ? "Ask the assistant…  (@ to reference a document · Enter to send · Shift+Enter for a new line)"
                                                                : "Claude Code CLI required for chat"
                             onTextChanged: win.refreshMentions()
                             onCursorPositionChanged: win.refreshMentions()
@@ -1918,7 +1929,7 @@ ApplicationWindow {
                             implicitWidth: 40
                             implicitHeight: 40
                             highlighted: true
-                            enabled: chat.available() && !win.chatBusy
+                            enabled: (chat && chat.available()) && !win.chatBusy
                                      && chatInput.text.trim() !== ""
                             onClicked: win.sendChat()
                             HoverTip { text: "Send" }
@@ -2172,7 +2183,7 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
                 font.pixelSize: 12
                 opacity: 0.7
-                text: reviser.cliAvailable()
+                text: (reviser && reviser.cliAvailable())
                       ? "Uses your logged-in Claude Code CLI — no API key needed. "
                         + "Revisions run through the MCP server and appear live."
                       : "Claude Code CLI not found on PATH — install it and log in, "
@@ -2370,7 +2381,7 @@ ApplicationWindow {
                 // the in-app Revise button passes this config inline and needs none
                 Row {
                     spacing: 12
-                    visible: reviser.cliAvailable()
+                    visible: (reviser && reviser.cliAvailable())
 
                     Button {
                         id: registerBtn
