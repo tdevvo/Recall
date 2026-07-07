@@ -2,6 +2,7 @@
 # Exposes CRUD + search over the shared Recall document database.
 # Python port of src/mcp_main.cpp; hand-rolled like the original (no SDK dependency).
 import json
+import os
 import sys
 
 from PySide6.QtCore import QCoreApplication
@@ -11,17 +12,21 @@ from .store import Store, default_db_path
 
 def client_config():
     """MCP client config that runs *this* package as the server via the current
-    interpreter. The package's directory is baked into the command with `python -c`
-    rather than left to PYTHONPATH: the client spawns the server from its own
-    working directory (often the home dir), where a plain `-m recall.mcp_server`
-    fails with ModuleNotFoundError unless PYTHONPATH is honoured — which is not
-    reliable. Embedding sys.path.insert in the argv makes the import work from any
-    cwd and any environment, while still running the live source (same code and
-    tools as the app), no install or console script required."""
+    interpreter, spawned by the client from an arbitrary cwd with a sanitized
+    environment. Two things are therefore baked into the argv rather than left to
+    the environment:
+      * the package directory (sys.path.insert) — so the import works without
+        PYTHONPATH, which the client does not reliably forward;
+      * the resolved database path — so the server opens the SAME database as the
+        running app. Otherwise QStandardPaths/HOME can resolve a different
+        default_db_path() under the client's environment and the server would edit
+        a phantom empty database, making every tool call fail from the user's view.
+    Resolved here, in the app's process, where both are correct."""
     from pathlib import Path
     pkg_parent = str(Path(__file__).resolve().parent.parent)
+    db = default_db_path()
     boot = ("import sys; sys.path.insert(0, %r); "
-            "from recall.mcp_server import main; sys.exit(main())" % pkg_parent)
+            "from recall.mcp_server import main; sys.exit(main(%r))" % (pkg_parent, db))
     return {"mcpServers": {"recall": {
         "command": sys.executable,
         "args": ["-c", boot],
@@ -177,10 +182,15 @@ def _reply_error(msg_id, code, message):
                      separators=(",", ":"), ensure_ascii=False), flush=True)
 
 
-def main():
+def main(db_path=None):
     QCoreApplication.setOrganizationName("Recall")
     QCoreApplication.setApplicationName("Recall")
-    store = Store(default_db_path())
+    # Use the DB path the app baked into our launch command. The client (claude)
+    # spawns us with a sanitized environment, so QStandardPaths/HOME can resolve a
+    # DIFFERENT default_db_path() than the running app — the server would then edit
+    # a phantom empty database and every tool call would "fail" from the user's
+    # view. An explicit path keeps the server on the app's real database.
+    store = Store(db_path or os.environ.get("RECALL_DB") or default_db_path())
 
     # Read with readline(), NOT `for line in sys.stdin`: file iteration reads
     # ahead in blocks, so the client's first request (initialize) can sit unseen

@@ -154,12 +154,27 @@ class Reviser(QObject):
 
     @Slot()
     def registerMcp(self):
+        # Remove any existing (possibly stale) registration first, then add the
+        # current one — `claude mcp add` refuses to overwrite, so without the
+        # remove an out-of-date command would linger forever. This makes the
+        # button a reliable "reinstall the up-to-date config" action.
+        rm = QProcess(self)
+        rm.setProcessEnvironment(cli_process_env(self._cli))
+
+        def after(*_):
+            rm.deleteLater()
+            self._register_add()
+
+        rm.finished.connect(after)
+        rm.start(self._cli, ["mcp", "remove", "--scope", "user", "recall"])
+
+    def _register_add(self):
         server = client_config()["mcpServers"]["recall"]
         # -e is variadic and would swallow a following positional, so the
         # name goes first and "--" terminates the env list
         args = ["mcp", "add", "--scope", "user", "recall"]
         for k, v in server.get("env", {}).items():
-            args += ["-e", f"{k}={v}"]  # e.g. the module fallback's PYTHONPATH
+            args += ["-e", f"{k}={v}"]
         args += ["--", server["command"], *server["args"]]
         proc = QProcess(self)
         proc.setProcessEnvironment(cli_process_env(self._cli))
