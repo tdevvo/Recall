@@ -18,9 +18,10 @@ DOC_ID_ROLE = Qt.UserRole + 1
 
 
 class DocTreeModel(QAbstractItemModel):
-    def __init__(self, store, parent=None):
+    def __init__(self, store, parent=None, templates=False):
         super().__init__(parent)
         self._store = store
+        self._templates = templates
         self._root = _Node()
         self._by_id = {}
         self._rebuild()
@@ -34,7 +35,7 @@ class DocTreeModel(QAbstractItemModel):
     def _rebuild(self):
         self._root.children = []
         self._by_id = {}
-        docs = self._store.list_documents()  # already sorted by title
+        docs = self._store.list_documents(is_template=self._templates)  # already sorted by title
 
         parked = []
         for d in docs:

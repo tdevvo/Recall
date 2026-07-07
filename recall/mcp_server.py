@@ -49,15 +49,30 @@ TOOLS = [
           {}, []),
     _tool("read_document", "Read a document's full record including its content.",
           {"id": _ID}, ["id"]),
-    _tool("create_document", "Create a new document. Returns the new document's id.",
+    _tool("create_document",
+          "Create a new document. Before writing, call list_templates and read any "
+          "relevant template with read_template — templates hold the wiki's house "
+          "style and structure rules that new documents must follow. Returns the new "
+          "document's id.",
           {"title": _TITLE, "content": _CONTENT, "parent_id": _PARENT}, ["title", "content"]),
     _tool("update_document",
-          "Update a document's title, content and/or parent_id. Only provided fields change.",
+          "Update a document's title, content and/or parent_id. Only provided fields "
+          "change. When rewriting content, follow the house style in the templates "
+          "(see list_templates / read_template).",
           {"id": _ID, "title": _TITLE, "content": _CONTENT, "parent_id": _PARENT}, ["id"]),
     _tool("delete_document", "Delete a document and all of its descendants.",
           {"id": _ID}, ["id"]),
     _tool("search", "Full-text search over titles and content. Returns matches with snippets.",
           {"query": {"type": "string"}}, ["query"]),
+    _tool("list_templates",
+          "List the wiki's templates as a flat array of {id, parent_id, title}. Templates "
+          "are documents that describe the house style, structure and conventions to apply "
+          "when creating or updating documents — consult them before writing.",
+          {}, []),
+    _tool("read_template",
+          "Read a template's full record including its content (the instructions to follow). "
+          "Use the ids returned by list_templates.",
+          {"id": _ID}, ["id"]),
     _tool("list_clarifications",
           "List pending 'Request Clarification' annotations as {id, doc_id, quoted_text, "
           "comment}. Each one is a request from the user to expand or clarify the quoted "
@@ -116,6 +131,13 @@ def call_tool(store, name, args):
         if not ok:
             return _text_result("delete failed: " + err, True)
         return _text_result("ok")
+    if name == "list_templates":
+        return _text_result(_dumps_pretty(store.list_templates()))
+    if name == "read_template":
+        doc = store.getDocument(int(args.get("id", 0)))
+        if not doc or not doc.get("is_template"):
+            return _text_result(f"template {args.get('id', 0)} not found", True)
+        return _text_result(_dumps_pretty(doc))
     if name == "list_clarifications":
         return _text_result(_dumps_pretty(store.list_clarifications()))
     if name == "resolve_clarification":

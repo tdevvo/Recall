@@ -82,6 +82,42 @@ Things to remember:
 See the [Qt documentation](https://doc.qt.io) for more on the renderer.
 """
 
+# Seeded into the Templates tree on first run. Templates are not documents in
+# their own right — they are instructions an AI agent reads (via the MCP
+# list_templates / read_template tools) before it creates or edits a document,
+# so the wiki keeps a consistent house style.
+STYLE_TEMPLATE_MD = """# House Style
+
+Instructions for the AI agent when it creates or updates documents in this wiki.
+Read the relevant templates with `list_templates` / `read_template` before
+writing, and follow them.
+
+## Structure
+
+- Start every document with a single `#` title that matches its tree title.
+- Use `##` for the main sections and `###` for sub-points; don't skip levels.
+- Open with a one- or two-sentence summary of what the document covers before
+  the first `##` heading.
+
+## Voice
+
+- Write in plain, direct prose. Prefer short sentences.
+- Second person ("you") for instructions; present tense for descriptions.
+- Define an acronym the first time it appears.
+
+## Formatting
+
+- `inline code` for identifiers, file names, and commands.
+- Fenced code blocks (with a language tag) for anything longer than one line.
+- Bulleted lists for unordered points; numbered lists only for ordered steps.
+
+## When updating
+
+- Preserve the existing structure and voice; edit in place rather than
+  rewriting wholesale unless asked.
+- Keep links and cross-references intact.
+"""
+
 def default_db_path():
     from pathlib import Path
     dir_ = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
@@ -109,11 +145,21 @@ class Store(QObject):
             " parent_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,"
             " title TEXT NOT NULL,"
             " content TEXT NOT NULL DEFAULT '',"
+            " is_template INTEGER NOT NULL DEFAULT 0,"
             " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
             " updated_at TEXT NOT NULL DEFAULT (datetime('now')))")
-        c.execute(
+        # is_template arrived after the original schema; add it to pre-existing
+        # databases (fresh ones already have it from the CREATE above)
+        cols = [r[1] for r in c.execute("PRAGMA table_info(documents)").fetchall()]
+        if "is_template" not in cols:
+            c.execute("ALTER TABLE documents ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0")
+        # porter: stemmed matching ("sorting" finds "sorted");
+        # remove_diacritics 2: accent-insensitive ("cafe" finds "café")
+        fts_create = (
             "CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5("
-            " title, content, content='documents', content_rowid='id')")
+            " title, content, content='documents', content_rowid='id',"
+            " tokenize='porter unicode61 remove_diacritics 2')")
+        c.execute(fts_create)
         c.execute(
             "CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON documents BEGIN"
             " INSERT INTO docs_fts(rowid, title, content) VALUES (new.id, new.title, new.content);"
@@ -143,6 +189,19 @@ class Store(QObject):
         if version < 1:
             self.create_document("Coding Example", CODING_EXAMPLE_MD, None)
             c.execute("PRAGMA user_version = 1")
+        if version < 2:
+            # re-tokenize the FTS index with the porter/diacritics config
+            # above — CREATE ... IF NOT EXISTS leaves pre-existing tables on
+            # the old plain tokenizer
+            c.execute("DROP TABLE IF EXISTS docs_fts")
+            c.execute(fts_create)
+            c.execute("INSERT INTO docs_fts(docs_fts) VALUES ('rebuild')")
+            c.execute("PRAGMA user_version = 2")
+        if version < 3:
+            # seed a starter template so the Templates view isn't empty and the
+            # AI agent has house-style guidance to follow from the start
+            self.create_document("House Style", STYLE_TEMPLATE_MD, None, is_template=True)
+            c.execute("PRAGMA user_version = 3")
 
     # --- GUI-facing ---
 
@@ -155,13 +214,31 @@ class Store(QObject):
         rows = self._db.execute(
             "SELECT d.id, d.title, snippet(docs_fts, 1, '<b>', '</b>', '…', 12)"
             " FROM docs_fts JOIN documents d ON d.id = docs_fts.rowid"
-            " WHERE docs_fts MATCH ? ORDER BY rank LIMIT 25",
+            # templates are agent instructions, not wiki content — keep them
+            # out of the reader's search results
+            " WHERE docs_fts MATCH ? AND d.is_template = 0"
+            # weighted bm25 instead of the default rank: a hit in the title
+            # says more about the document than one in the body
+            " ORDER BY bm25(docs_fts, 5.0, 1.0) LIMIT 25",
             (" ".join(parts),)).fetchall()
         return [{"id": r[0], "title": r[1], "snippet": r[2]} for r in rows]
 
+    @Slot(str, result="QVariantList")
+    def searchTitles(self, query):
+        """Documents whose title contains `query` (empty → all), for @-mentions.
+        Templates excluded; capped."""
+        like = "%" + query.strip().lower().replace("%", r"\%").replace("_", r"\_") + "%"
+        rows = self._db.execute(
+            "SELECT id, title FROM documents"
+            " WHERE is_template = 0 AND lower(title) LIKE ? ESCAPE '\\'"
+            " ORDER BY title COLLATE NOCASE LIMIT 8", (like,)).fetchall()
+        return [{"id": r[0], "title": r[1]} for r in rows]
+
     @Slot(str, str, int, result=int)
-    def createDoc(self, title, content, parent_id):
-        doc_id, _ = self.create_document(title, content, parent_id if parent_id >= 0 else None)
+    @Slot(str, str, int, bool, result=int)
+    def createDoc(self, title, content, parent_id, is_template=False):
+        doc_id, _ = self.create_document(
+            title, content, parent_id if parent_id >= 0 else None, is_template)
         return doc_id
 
     @Slot(int, str, str, result=bool)
@@ -208,27 +285,33 @@ class Store(QObject):
 
     # --- CRUD (used by the MCP server and the tree model) ---
 
-    def list_documents(self):
+    def list_documents(self, is_template=False):
         rows = self._db.execute(
-            "SELECT id, parent_id, title FROM documents ORDER BY title COLLATE NOCASE").fetchall()
+            "SELECT id, parent_id, title FROM documents WHERE is_template = ?"
+            " ORDER BY title COLLATE NOCASE", (1 if is_template else 0,)).fetchall()
         return [{"id": r[0], "parent_id": r[1], "title": r[2]} for r in rows]
+
+    def list_templates(self):
+        return self.list_documents(is_template=True)
 
     @Slot(int, result="QVariantMap")
     def getDocument(self, doc_id):
         row = self._db.execute(
-            "SELECT id, parent_id, title, content, created_at, updated_at"
+            "SELECT id, parent_id, title, content, is_template, created_at, updated_at"
             " FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if row is None:
             return {}
         return {"id": row[0], "parent_id": row[1], "title": row[2],
-                "content": row[3], "created_at": row[4], "updated_at": row[5]}
+                "content": row[3], "is_template": bool(row[4]),
+                "created_at": row[5], "updated_at": row[6]}
 
-    def create_document(self, title, content, parent_id):
+    def create_document(self, title, content, parent_id, is_template=False):
         """Returns (id, error); id is -1 on failure."""
         try:
             cur = self._db.execute(
-                "INSERT INTO documents(parent_id, title, content) VALUES (?, ?, ?)",
-                (parent_id, title, content))
+                "INSERT INTO documents(parent_id, title, content, is_template)"
+                " VALUES (?, ?, ?, ?)",
+                (parent_id, title, content, 1 if is_template else 0))
         except sqlite3.Error as e:
             return -1, str(e)
         self.changed.emit()

@@ -26,6 +26,20 @@ def test_store(tmp):
     assert any(h["id"] == doc_id for h in hits), hits
     assert store.search('"; DROP') == [] or True  # FTS quoting must not raise
 
+    # porter stemming: inflected query finds the base form and vice versa
+    ok, err = store.update_document(doc_id, {"content": "notes on optimizing tight loops at a café"})
+    assert ok, err
+    assert any(h["id"] == doc_id for h in store.search("optimized loop")), "stemming"
+    assert any(h["id"] == doc_id for h in store.search("cafe")), "diacritics"
+
+    # title hits rank above content hits
+    t_id, _ = store.create_document("Zebra handbook", "nothing relevant", None)
+    c_id, _ = store.create_document("Misc", "the zebra is mentioned in passing", None)
+    ranked = [h["id"] for h in store.search("zebra")]
+    assert ranked.index(t_id) < ranked.index(c_id), ranked
+    store.delete_document(t_id)
+    store.delete_document(c_id)
+
     cid = store.addClarification(doc_id, "quicksort", "expand this")
     assert cid > 0
     assert store.clarificationsFor(doc_id)[0]["comment"] == "expand this"
@@ -35,6 +49,17 @@ def test_store(tmp):
     ok, _ = store.delete_document(doc_id)
     assert ok
     assert store.getDocument(doc_id) == {}
+
+    # templates live in the same table but are kept out of list_documents/search
+    seeded = store.list_templates()
+    assert any(t["title"] == "House Style" for t in seeded), seeded
+    tmpl_id, err = store.create_document("Naming rules", "use kebab-case", None,
+                                         is_template=True)
+    assert tmpl_id > 0, err
+    assert store.getDocument(tmpl_id)["is_template"] is True
+    assert not any(d["id"] == tmpl_id for d in store.list_documents())
+    assert any(t["id"] == tmpl_id for t in store.list_templates())
+    assert not any(h["id"] == tmpl_id for h in store.search("kebab")), "templates excluded from search"
 
 
 def test_mcp(tmp):
@@ -54,7 +79,7 @@ def test_mcp(tmp):
                          check=True).stdout.splitlines()
     replies = {json.loads(l)["id"]: json.loads(l) for l in out}
     assert replies[1]["result"]["serverInfo"]["name"] == "recall"
-    assert len(replies[2]["result"]["tools"]) == 8
+    assert len(replies[2]["result"]["tools"]) == 10
     assert "created document" in replies[3]["result"]["content"][0]["text"]
     # snippet() bolds the match: "<b>mcp</b> test body"
     assert "test body" in replies[4]["result"]["content"][0]["text"]

@@ -21,6 +21,22 @@ ApplicationWindow {
     property bool editing: false
     property int editDocId: -1    // -1 while creating a new document
     property int editParentId: -1
+    property bool editIsTemplate: false  // creating into the Templates tree?
+
+    // Templates view: swaps the document tree for the tree of template
+    // documents (agent instructions), and makes Add/create act on that tree
+    property bool templateMode: false
+
+    // right-side assistant chat panel
+    property bool chatOpen: false
+    property bool chatBusy: false
+    property var chatRefs: []   // doc ids @-referenced in the pending message
+
+    // Activity timeline (technical log). Collapsed by default; auto-expands
+    // while the agent works, or when the user pins it open.
+    property bool activityPinned: false
+    property bool activityFull: false   // show untruncated output + a wider panel
+    readonly property bool activityExpanded: chatOpen && (chatBusy || activityPinned)
     property string docContent: ""
     property var clarifs: []        // pending clarifications for the open document
     property var clarifyRanges: []  // clarifs + matched {start,end} in the reader text
@@ -68,6 +84,69 @@ ApplicationWindow {
         }
     }
 
+    // small underline-less text button used under assistant replies
+    component ChatLink: Label {
+        id: chatLink
+        property bool active: true
+        signal clicked()
+        font.pixelSize: 12
+        font.capitalization: Font.MixedCase
+        opacity: active ? 1 : 0.55
+        color: chatLinkMA.containsMouse && active ? "#5c6bc0" : "#3949ab"
+        MouseArea {
+            id: chatLinkMA
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: chatLink.active ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: if (chatLink.active) chatLink.clicked()
+        }
+    }
+
+    // clickable copy button with a drawn clipboard icon (no emoji font needed);
+    // briefly flips to a check after copying
+    component CopyIconButton: ToolButton {
+        id: copyIcon
+        property string payload: ""
+        property bool done: false
+        implicitWidth: 28
+        implicitHeight: 26
+        padding: 0
+        focusPolicy: Qt.NoFocus
+        onClicked: { highlighter.copy(payload); done = true; copyIconReset.restart() }
+        Timer { id: copyIconReset; interval: 1200; onTriggered: copyIcon.done = false }
+        HoverTip { text: copyIcon.done ? "Copied!" : "Copy" }
+        background: Rectangle {
+            radius: 4
+            color: copyIcon.down ? "#e8eaf6" : copyIcon.hovered ? "#eef0f8" : "transparent"
+        }
+        contentItem: Item {
+            Canvas {
+                anchors.centerIn: parent
+                width: 15
+                height: 15
+                property color tint: copyIcon.done ? "#2e7d32"
+                                   : copyIcon.hovered ? "#3949ab" : "#78909c"
+                onTintChanged: requestPaint()
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.reset()
+                    ctx.strokeStyle = tint
+                    ctx.lineWidth = 1.3
+                    ctx.lineJoin = "round"
+                    ctx.lineCap = "round"
+                    if (copyIcon.done) {
+                        ctx.beginPath()
+                        ctx.moveTo(3, 8); ctx.lineTo(6.5, 11.5); ctx.lineTo(12.5, 4)
+                        ctx.stroke()
+                    } else {
+                        ctx.strokeRect(5, 5, 8, 8)   // back sheet
+                        ctx.strokeRect(2, 2, 8, 8)   // front sheet
+                    }
+                }
+            }
+        }
+    }
+
     // tooltip shown above its parent control instead of the default below
     component HoverTip: ToolTip {
         x: (parent.width - width) / 2
@@ -80,6 +159,9 @@ ApplicationWindow {
         property string tip
         implicitWidth: 40
         implicitHeight: 40
+        // never steal focus from the editor: its selection is the operand
+        // of every formatting action
+        focusPolicy: Qt.NoFocus
         HoverTip { text: parent.tip }
     }
 
@@ -137,7 +219,6 @@ ApplicationWindow {
 
     // (re)fetch the open document's content + clarifications from the store
     function loadDoc(id) {
-        streamTimer.stop()
         streaming = false
         var doc = id >= 0 ? store.getDocument(id) : {}
         docContent = doc.id ? doc.content : ""
@@ -145,46 +226,28 @@ ApplicationWindow {
         Qt.callLater(win.applyHighlights) // after the TextEdit re-parses the markdown
     }
 
-    // --- stream-in: updated content flows into the reader line by line
-    //     instead of jumping to the new state ---
-    property bool streaming: false
-    property string streamTarget: ""
-    property int streamPos: 0
+    // Apply an external update to the reader with a soft cross-fade.
+    //
+    // The reader renders Markdown, which is block-structured: while a code
+    // fence, table or heading is only partly present it parses as something
+    // completely different, so revealing the new text character by character
+    // made the whole document reflow violently. Instead we swap straight to the
+    // final (correctly laid-out) content and dissolve a snapshot of the old
+    // text over it — the change flows in without any reflow thrashing.
+    property bool streaming: false   // retained (inert) for the stream-glow overlay
+    property string pendingContent: "" // next text, swapped in at the fade's peak
 
     function streamTo(newContent) {
-        // keep the unchanged head stable; type in everything from the first
-        // divergent line onward
-        var old = docContent // what's on screen, streaming or not
-        var minLen = Math.min(old.length, newContent.length)
-        var i = 0
-        while (i < minLen && old[i] === newContent[i])
-            i++
-        i = newContent.lastIndexOf("\n", i) + 1 // whole lines only
-        streamTarget = newContent
-        streamPos = i
-        docContent = newContent.substring(0, streamPos)
-        streaming = true
-        streamTimer.start()
+        streaming = false
+        pendingContent = newContent
+        docFade.restart()            // dim → swap → reveal (see the reader's cover)
     }
 
-    Timer {
-        id: streamTimer
-        interval: 16 // 60fps character flow
-        repeat: true
-        onTriggered: {
-            // ease-out pacing: sweep through the bulk, settle gently at the end
-            var remaining = win.streamTarget.length - win.streamPos
-            var step = Math.max(3, Math.round(remaining * 0.045))
-            win.streamPos = Math.min(win.streamTarget.length, win.streamPos + step)
-            win.docContent = win.streamTarget.substring(0, win.streamPos)
-            // every frame: stale slab geometry smears over prose otherwise
-            Qt.callLater(win.applyHighlights)
-            if (win.streamPos >= win.streamTarget.length) {
-                streamTimer.stop()
-                win.streaming = false
-                win.loadDoc(win.currentDocId) // final sync (clarifs, exact text)
-            }
-        }
+    // swap in the pending text while the cover is opaque, so the layout change
+    // (which would otherwise jump) happens hidden behind the dimmed overlay
+    function applyPending() {
+        docContent = pendingContent
+        Qt.callLater(win.applyHighlights)
     }
 
     // paint code blocks + clarification quotes in the reader's text document
@@ -211,6 +274,7 @@ ApplicationWindow {
     function startNew(parentId) {
         editDocId = -1
         editParentId = parentId
+        editIsTemplate = templateMode  // the active tree decides the kind
         titleField.text = ""
         editor.text = ""
         editing = true
@@ -232,7 +296,8 @@ ApplicationWindow {
     function saveDoc() {
         var id = editDocId
         if (id < 0) {
-            id = store.createDoc(titleField.text, editor.text, editParentId)
+            id = store.createDoc(titleField.text, editor.text, editParentId,
+                                 win.editIsTemplate)
             if (id < 0)
                 return // create failed; stay in the editor
         } else {
@@ -240,7 +305,9 @@ ApplicationWindow {
         }
         editing = false
         openDoc(id)
-        tree.expandToIndex(docModel.indexForDoc(id)) // reveal the new document in the tree
+        // reveal the new document in whichever tree it belongs to
+        var m = win.editIsTemplate ? templateModel : docModel
+        tree.expandToIndex(m.indexForDoc(id))
     }
 
     function closeEditor() {
@@ -249,7 +316,7 @@ ApplicationWindow {
     }
 
     // pick up an external change to the open document: unchanged content just
-    // refreshes annotations; new content flows in via the stream
+    // refreshes annotations; new content is swapped in
     function refreshCurrentDoc() {
         if (editing || currentDocId < 0)
             return
@@ -259,8 +326,7 @@ ApplicationWindow {
             return
         }
         clarifs = store.clarificationsFor(currentDocId)
-        var shown = streaming ? streamTarget : docContent
-        if (doc.content === shown) {
+        if (doc.content === docContent) {
             Qt.callLater(applyHighlights)
             return
         }
@@ -291,6 +357,90 @@ ApplicationWindow {
         var lineStart = editor.text.lastIndexOf("\n", editor.selectionStart - 1) + 1
         editor.insert(lineStart, pre)
         editor.forceActiveFocus()
+    }
+
+    // --- assistant chat ---
+    function chatScrollEnd() {
+        chatList.positionViewAtEnd()
+    }
+
+    function techScrollEnd() {
+        techList.positionViewAtEnd()
+    }
+
+    function sendChat() {
+        var t = chatInput.text.trim()
+        if (t === "" || win.chatBusy || !chat.available())
+            return
+        mentionPop.close()
+        chatModel.append({ kind: "user", text: t })
+        chatInput.text = ""
+        chat.send(t, win.currentDocId, win.chatRefs)
+        win.chatRefs = []
+        Qt.callLater(win.chatScrollEnd)
+    }
+
+    // append chat text (a whole response or a selection) to the open document;
+    // the reader picks up the change through store.changed like any other edit
+    function addToCurrentDoc(text) {
+        if (win.currentDocId <= 0 || win.editing || !text)
+            return false
+        var doc = store.getDocument(win.currentDocId)
+        if (!doc.id)
+            return false
+        var body = doc.content
+        var sep = body.length === 0 ? "" : (body.charAt(body.length - 1) === "\n" ? "\n" : "\n\n")
+        store.updateDoc(win.currentDocId, doc.title, body + sep + text)
+        return true
+    }
+
+    // --- @-mention: the token being typed at the caret, or null ---
+    function mentionToken() {
+        var pos = chatInput.cursorPosition
+        var text = chatInput.text
+        var at = text.lastIndexOf("@", pos - 1)
+        if (at < 0)
+            return null
+        // must start the line or follow whitespace, and hold no space up to caret
+        if (at > 0 && !/\s/.test(text.charAt(at - 1)))
+            return null
+        var frag = text.substring(at + 1, pos)
+        if (/\s/.test(frag))
+            return null
+        return { at: at, query: frag }
+    }
+
+    function refreshMentions() {
+        var tok = win.mentionToken()
+        if (tok === null) {
+            mentionPop.close()
+            return
+        }
+        mentionPop.matches = store.searchTitles(tok.query)
+        mentionPop.at = tok.at
+        if (mentionPop.matches.length > 0) {
+            mentionList.currentIndex = 0
+            if (!mentionPop.visible)
+                mentionPop.open()
+        } else {
+            mentionPop.close()
+        }
+    }
+
+    function applyMention(doc) {
+        var pos = chatInput.cursorPosition
+        var at = mentionPop.at
+        var before = chatInput.text.substring(0, at)
+        var after = chatInput.text.substring(pos)
+        var insert = "@" + doc.title + " "
+        chatInput.text = before + insert + after
+        chatInput.cursorPosition = before.length + insert.length
+        var refs = win.chatRefs.slice()
+        if (refs.indexOf(doc.id) < 0)
+            refs.push(doc.id)
+        win.chatRefs = refs
+        mentionPop.close()
+        chatInput.forceActiveFocus()
     }
 
     Connections {
@@ -341,12 +491,73 @@ ApplicationWindow {
                 }
             }
         }
+        ToolButton {
+            id: chatToggleBtn
+            implicitWidth: 48
+            implicitHeight: 48
+            anchors.right: menuBtn.left
+            anchors.rightMargin: 4
+            anchors.verticalCenter: parent.verticalCenter
+            background: Rectangle {
+                radius: width / 2
+                color: win.chatOpen ? "#c5cae9"
+                     : chatToggleBtn.down ? "#c5cae9"
+                     : chatToggleBtn.hovered ? "#dde1f1" : "transparent"
+            }
+            // drawn speech bubble instead of an emoji glyph, which needs a
+            // colour-emoji font that isn't guaranteed to be installed
+            contentItem: Item {
+                Canvas {
+                    width: 24
+                    height: 24
+                    anchors.centerIn: parent
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.reset()
+                        ctx.fillStyle = "#3949ab"
+                        var x = 2, y = 3, w = 20, h = 15, r = 5
+                        ctx.beginPath()
+                        ctx.moveTo(x + r, y)
+                        ctx.lineTo(x + w - r, y)
+                        ctx.arcTo(x + w, y, x + w, y + r, r)
+                        ctx.lineTo(x + w, y + h - r)
+                        ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
+                        ctx.lineTo(x + r, y + h)
+                        ctx.arcTo(x, y + h, x, y + h - r, r)
+                        ctx.lineTo(x, y + r)
+                        ctx.arcTo(x, y, x + r, y, r)
+                        ctx.closePath()
+                        ctx.fill()
+                        // tail at the bottom-left
+                        ctx.beginPath()
+                        ctx.moveTo(x + 4, y + h - 1)
+                        ctx.lineTo(x + 4, y + h + 5)
+                        ctx.lineTo(x + 10, y + h - 1)
+                        ctx.closePath()
+                        ctx.fill()
+                        // three dots
+                        ctx.fillStyle = "#ffffff"
+                        for (var i = 0; i < 3; i++) {
+                            ctx.beginPath()
+                            ctx.arc(x + 5 + i * 5, y + h / 2 - 1, 1.4, 0, 2 * Math.PI)
+                            ctx.fill()
+                        }
+                    }
+                }
+            }
+            HoverTip { text: win.chatOpen ? "Hide assistant" : "Chat with the assistant" }
+            onClicked: win.chatOpen = !win.chatOpen
+        }
+
         TextField {
             id: searchField
-            width: Math.min(700, win.width - sidebar.width - 96)
+            // viewer area = space between the sidebar and (when open) the chat pane;
+            // the extra 56 keeps the field clear of the chat/settings buttons
+            readonly property real viewerLeft: sidebar.width
+            readonly property real viewerRight: win.width - (win.chatOpen ? chatPane.width : 0)
+            width: Math.max(180, Math.min(700, viewerRight - viewerLeft - 112))
             anchors.verticalCenter: parent.verticalCenter
-            // centered over the viewer area, i.e. the space right of the sidebar
-            x: sidebar.width + (win.width - sidebar.width - width) / 2
+            x: viewerLeft + (viewerRight - viewerLeft - width) / 2
             leftPadding: 12
             rightPadding: 12
             // single flat border instead of the Material underline + outline combo
@@ -457,18 +668,49 @@ ApplicationWindow {
                 Button {
                     Layout.fillWidth: true
                     Layout.margins: 8
+                    Layout.bottomMargin: 4
                     Layout.preferredHeight: 42
-                    text: "＋ Add document"
+                    text: win.templateMode ? "＋ Add template" : "＋ Add document"
                     implicitHeight: 42
                     font.capitalization: Font.MixedCase
                     font.weight: Font.Medium
                     enabled: !win.editing
                     onClicked: win.startNew(-1)
-                    HoverTip { text: "Adds a top-level document — right-click a document in the tree to add a child under it" }
+                    HoverTip {
+                        text: win.templateMode
+                              ? "Adds a top-level template — right-click a template in the tree to add a child under it"
+                              : "Adds a top-level document — right-click a document in the tree to add a child under it"
+                    }
                     background: Rectangle {
                         radius: height / 2
                         color: parent.down ? "#c7c7c7"
                              : parent.hovered ? "#dddddd" : "#d6d6d6"
+                    }
+                }
+
+                // Documents / Templates switch: swaps which tree is shown and
+                // which one Add and the editor act on
+                TabBar {
+                    id: viewTabs
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 8
+                    Layout.bottomMargin: 6
+                    enabled: !win.editing
+                    currentIndex: win.templateMode ? 1 : 0
+                    onCurrentIndexChanged: win.templateMode = (currentIndex === 1)
+                    background: null
+
+                    TabButton {
+                        text: "Documents"
+                        font.capitalization: Font.MixedCase
+                        font.pixelSize: 13
+                    }
+                    TabButton {
+                        text: "Templates"
+                        font.capitalization: Font.MixedCase
+                        font.pixelSize: 13
+                        HoverTip { text: "Instructions the AI agent follows when it creates or edits documents" }
                     }
                 }
 
@@ -482,7 +724,7 @@ ApplicationWindow {
                         id: tree
                         anchors.fill: parent
                         clip: true
-                        model: docModel
+                        model: win.templateMode ? templateModel : docModel
                         // all expand/collapse goes through our animated handlers below;
                         // this kills the built-in instant double-tap toggle
                         pointerNavigationEnabled: false
@@ -497,10 +739,13 @@ ApplicationWindow {
                             delete expandedIds[docModel.docIdFor(tree.index(row, 0))]
                         }
                         Connections {
-                            target: docModel
+                            // follows the active tree; the other model resetting
+                            // (both reload on store.changed) mustn't disturb the
+                            // rows on screen
+                            target: tree.model
                             function onModelReset() {
                                 for (var id in tree.expandedIds) {
-                                    var idx = docModel.indexForDoc(parseInt(id))
+                                    var idx = tree.model.indexForDoc(parseInt(id))
                                     if (!idx.valid)
                                         continue
                                     tree.expandToIndex(idx) // ancestors
@@ -590,7 +835,7 @@ ApplicationWindow {
                             Menu {
                                 id: rowMenu
                                 MenuItem {
-                                    text: "Add document"
+                                    text: win.templateMode ? "Add template" : "Add document"
                                     enabled: !win.editing
                                     onTriggered: win.startNew(treeRow.model.docId)
                                 }
@@ -785,6 +1030,9 @@ ApplicationWindow {
                                 wrapMode: TextArea.Wrap
                                 font.family: "monospace"
                                 background: null // the card provides the border
+                                // keep the selection when a toolbar button takes
+                                // the click — wrapSel() wraps whatever is selected
+                                persistentSelection: true
                                 placeholderText: "Write in Markdown — toggle Preview to see it rendered."
                             }
                         }
@@ -1028,19 +1276,21 @@ ApplicationWindow {
                             x: -12
                             width: docView.width + 24
                             // touch width/text so geometry re-resolves on relayout.
-                            // 12px interior pad each side; stays inside the 28px
-                            // code margins so a 16px gap is visible around the slab
-                            y: { docView.width; docView.text; return docView.posRect(codeSlab.modelData.start).y - 12 }
+                            // 32px header strip above the code (holds the copy
+                            // button) and 18px pad below; both sit inside the code
+                            // block margins so a ~12-14px gap stays around the slab
+                            y: { docView.width; docView.text; return docView.posRect(codeSlab.modelData.start).y - 32 }
                             height: {
                                 docView.width
                                 docView.text
                                 var r = docView.posRect(codeSlab.modelData.end)
-                                return r.y + r.height - y + 12
+                                return r.y + r.height - y + 18
                             }
                         }
                     }
 
-                    // per-code-block copy buttons, right-aligned over the grey slab
+                    // per-code-block copy buttons, right-aligned in the slab's header
+                    // strip above the code so they never sit on the code text
                     Repeater {
                         model: win.codeRanges
                         delegate: ToolButton {
@@ -1050,10 +1300,10 @@ ApplicationWindow {
                             text: copied ? "Copied!" : "Copy"
                             font.pixelSize: 11
                             font.capitalization: Font.MixedCase
-                            implicitHeight: 28
+                            implicitHeight: 24
                             // touch width/text so the position re-resolves on relayout
-                            x: { docView.width; return docView.width - width - 8 }
-                            y: { docView.width; docView.text; return docView.posRect(copyBtn.modelData.start).y + 4 }
+                            x: { docView.width; return docView.width - width - 4 }
+                            y: { docView.width; docView.text; return docView.posRect(copyBtn.modelData.start).y - 30 }
                             onClicked: {
                                 highlighter.copy(copyBtn.modelData.text)
                                 copied = true
@@ -1172,6 +1422,31 @@ ApplicationWindow {
                             }
                         }
                     }
+                }
+            }
+
+            // fade-through cover for document updates: dim to the page colour,
+            // swap the text while it's hidden, then reveal — the change flows in
+            // with no reflow jump and no double image (see streamTo / applyPending).
+            // Declared after the Flickable but before the buttons so it covers only
+            // the document, leaving the Revise/clarification controls on top.
+            Rectangle {
+                id: docCover
+                anchors.fill: flick
+                color: win.Material.background
+                opacity: 0
+                visible: opacity > 0.001
+            }
+            SequentialAnimation {
+                id: docFade
+                NumberAnimation {
+                    target: docCover; property: "opacity"
+                    from: 0; to: 1; duration: 120; easing.type: Easing.InQuad
+                }
+                ScriptAction { script: win.applyPending() }
+                NumberAnimation {
+                    target: docCover; property: "opacity"
+                    from: 1; to: 0; duration: 240; easing.type: Easing.OutQuad
                 }
             }
 
@@ -1358,6 +1633,508 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+
+        // Right-side assistant: a conversational Claude Code session with full
+        // access to the Recall MCP tools, so the agent reads and edits the wiki
+        // live as you chat. Edits land in the shared db and stream into the
+        // reader like any other external change.
+        Rectangle {
+            id: chatPane
+            visible: win.chatOpen
+            SplitView.preferredWidth: 380
+            SplitView.minimumWidth: 300
+            color: "#f5f6fa"
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 48
+                    color: "#e8eaf6"
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 6
+                        spacing: 4
+                        Label {
+                            text: "Assistant"
+                            font.pixelSize: 16
+                            font.weight: Font.Medium
+                            color: "#3949ab"
+                            Layout.fillWidth: true
+                        }
+                        ToolButton {
+                            id: activityToggle
+                            text: "Activity"
+                            font.capitalization: Font.MixedCase
+                            font.pixelSize: 12
+                            Material.foreground: win.activityExpanded ? "#3949ab" : "#90a4ae"
+                            onClicked: win.activityPinned = !win.activityPinned
+                            HoverTip { text: win.activityExpanded ? "Hide the activity log"
+                                                                  : "Show the activity log" }
+                        }
+                        ToolButton {
+                            text: "New chat"
+                            font.capitalization: Font.MixedCase
+                            font.pixelSize: 12
+                            enabled: !win.chatBusy && chatModel.count > 0
+                            onClicked: { chat.reset(); chatModel.clear(); techModel.clear(); win.chatRefs = [] }
+                            HoverTip { text: "Start a new conversation (clears context)" }
+                        }
+                        ToolButton {
+                            text: "✕"
+                            implicitWidth: 36
+                            implicitHeight: 36
+                            onClicked: win.chatOpen = false
+                            HoverTip { text: "Hide assistant" }
+                        }
+                    }
+                }
+
+                ListView {
+                    id: chatList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: chatModel
+                    spacing: 12
+                    topMargin: 12
+                    bottomMargin: 12
+                    leftMargin: 12
+                    rightMargin: 12
+                    ScrollBar.vertical: ScrollBar {}
+
+                    Label {
+                        anchors.centerIn: parent
+                        width: parent.width - 48
+                        visible: chatModel.count === 0
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        opacity: 0.6
+                        font.pixelSize: 13
+                        text: chat.available()
+                              ? "Ask me to add or update documentation, or to look something up — I edit the wiki live as we talk. Type @ to reference a document."
+                              : "Chat needs the Claude Code CLI. Install it and log in, then reopen this panel."
+                    }
+
+                    delegate: Column {
+                        id: msg
+                        required property var model
+                        width: chatList.width - chatList.leftMargin - chatList.rightMargin
+                        spacing: 4
+                        readonly property string kind: model.kind
+                        readonly property bool isUser: kind === "user"
+                        readonly property bool isAssistant: kind === "assistant"
+                        readonly property bool bubble: isUser || isAssistant
+
+                        // user message: indigo bubble, right-aligned, selectable
+                        Row {
+                            visible: msg.isUser
+                            width: msg.width
+                            layoutDirection: Qt.RightToLeft
+                            Rectangle {
+                                width: Math.min(uedit.implicitWidth + 24, msg.width * 0.85)
+                                height: uedit.contentHeight + 18
+                                radius: 12
+                                color: "#5c6bc0"
+                                TextEdit {
+                                    id: uedit
+                                    x: 12
+                                    y: 9
+                                    width: parent.width - 24
+                                    readOnly: true
+                                    selectByMouse: true
+                                    persistentSelection: true
+                                    wrapMode: TextEdit.Wrap
+                                    textFormat: TextEdit.PlainText
+                                    text: msg.model.text
+                                    font.pixelSize: 13
+                                    color: "white"
+                                }
+                            }
+                        }
+
+                        // assistant reply: white bubble, left-aligned, Markdown,
+                        // selectable, with add-to-document / copy actions beneath
+                        Column {
+                            visible: msg.isAssistant
+                            width: msg.width
+                            spacing: 3
+
+                            Rectangle {
+                                width: Math.min(aedit.implicitWidth + 24, msg.width * 0.95)
+                                height: aedit.contentHeight + 18
+                                radius: 12
+                                color: "white"
+                                border.width: 1
+                                border.color: win.borderColor
+                                TextEdit {
+                                    id: aedit
+                                    x: 12
+                                    y: 9
+                                    width: parent.width - 24
+                                    readOnly: true
+                                    selectByMouse: true
+                                    persistentSelection: true
+                                    wrapMode: TextEdit.Wrap
+                                    textFormat: TextEdit.MarkdownText
+                                    text: msg.model.text
+                                    font.pixelSize: 13
+                                    color: "#212121"
+                                    onLinkActivated: function (link) { Qt.openUrlExternally(link) }
+                                }
+                            }
+
+                            Row {
+                                leftPadding: 4
+                                spacing: 10
+                                ChatLink {
+                                    height: 26
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: aedit.selectedText.length > 0 ? "+ Add selection to document"
+                                                                        : "+ Add to document"
+                                    active: win.currentDocId > 0 && !win.editing
+                                    onClicked: {
+                                        var t = aedit.selectedText.length > 0 ? aedit.selectedText
+                                                                              : msg.model.text
+                                        if (win.addToCurrentDoc(t))
+                                            aedit.deselect()
+                                    }
+                                }
+                                CopyIconButton {
+                                    payload: aedit.selectedText.length > 0 ? aedit.selectedText
+                                                                           : msg.model.text
+                                }
+                            }
+                        }
+
+                        // tool activity / notices / errors: subtle full-width lines
+                        Label {
+                            visible: !msg.bubble
+                            width: msg.width
+                            text: msg.model.text
+                            wrapMode: Text.Wrap
+                            font.family: msg.kind === "tool" ? "monospace" : win.font.family
+                            font.pixelSize: msg.kind === "error" ? 12 : 11
+                            color: (msg.kind === "error" || msg.kind === "note") ? "#c62828" : "#607d8b"
+                        }
+                    }
+                }
+
+                // "working" pulse while a turn is in flight
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.topMargin: 2
+                    Layout.bottomMargin: 2
+                    visible: win.chatBusy
+                    text: "✦ Working…"
+                    font.pixelSize: 12
+                    color: "#3949ab"
+                    SequentialAnimation on opacity {
+                        running: win.chatBusy
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 0.4; to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+                        NumberAnimation { from: 1.0; to: 0.4; duration: 600; easing.type: Easing.InOutSine }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.margins: 8
+                    implicitHeight: inputRow.implicitHeight + 12
+                    radius: 8
+                    color: "white"
+                    border.width: 1
+                    border.color: chatInput.activeFocus ? win.Material.accent : win.borderColor
+
+                    RowLayout {
+                        id: inputRow
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 6
+                        anchors.topMargin: 4
+                        anchors.bottomMargin: 4
+                        spacing: 6
+
+                        // bare TextArea (no ScrollView): grows with content up to a
+                        // cap, then scrolls internally without a visible scrollbar
+                        TextArea {
+                            id: chatInput
+                            Layout.fillWidth: true
+                            Layout.maximumHeight: 120
+                            enabled: chat.available() && !win.chatBusy
+                            wrapMode: TextArea.Wrap
+                            background: null
+                            font.pixelSize: 13
+                            placeholderText: chat.available() ? "Ask the assistant…  (@ to reference a document · Enter to send · Shift+Enter for a new line)"
+                                                               : "Claude Code CLI required for chat"
+                            onTextChanged: win.refreshMentions()
+                            onCursorPositionChanged: win.refreshMentions()
+                            Keys.onReturnPressed: function (event) {
+                                if (mentionPop.visible) {
+                                    event.accepted = true
+                                    mentionList.acceptCurrent()
+                                } else if (event.modifiers & Qt.ShiftModifier) {
+                                    event.accepted = false // newline
+                                } else {
+                                    event.accepted = true
+                                    win.sendChat()
+                                }
+                            }
+                            Keys.onEnterPressed: function (event) {
+                                if (mentionPop.visible) {
+                                    event.accepted = true
+                                    mentionList.acceptCurrent()
+                                } else {
+                                    event.accepted = true
+                                    win.sendChat()
+                                }
+                            }
+                            Keys.onUpPressed: function (event) {
+                                if (mentionPop.visible) { event.accepted = true; mentionList.moveUp() }
+                                else event.accepted = false
+                            }
+                            Keys.onDownPressed: function (event) {
+                                if (mentionPop.visible) { event.accepted = true; mentionList.moveDown() }
+                                else event.accepted = false
+                            }
+                            Keys.onEscapePressed: function (event) {
+                                if (mentionPop.visible) { event.accepted = true; mentionPop.close() }
+                                else event.accepted = false
+                            }
+                        }
+
+                        RoundButton {
+                            id: sendBtn
+                            text: "➤"
+                            font.pixelSize: 16
+                            implicitWidth: 40
+                            implicitHeight: 40
+                            highlighted: true
+                            enabled: chat.available() && !win.chatBusy
+                                     && chatInput.text.trim() !== ""
+                            onClicked: win.sendChat()
+                            HoverTip { text: "Send" }
+                        }
+                    }
+
+                    // @-mention picker, floating above the input
+                    Popup {
+                        id: mentionPop
+                        property var matches: []
+                        property int at: -1
+                        x: 0
+                        y: -height - 6
+                        width: parent.width
+                        // count-based so the frame is right immediately, before
+                        // the ListView reports its laid-out contentHeight
+                        height: Math.min(224, mentionPop.matches.length * 40 + topPadding + bottomPadding)
+                        padding: 4
+                        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                        background: Rectangle {
+                            radius: 8
+                            color: "white"
+                            border.width: 1
+                            border.color: win.borderColor
+                        }
+                        contentItem: ListView {
+                            id: mentionList
+                            clip: true
+                            model: mentionPop.matches
+                            currentIndex: 0
+                            ScrollBar.vertical: ScrollBar {}
+
+                            function acceptCurrent() {
+                                if (currentIndex >= 0 && currentIndex < mentionPop.matches.length)
+                                    win.applyMention(mentionPop.matches[currentIndex])
+                            }
+                            function moveUp() { if (currentIndex > 0) currentIndex-- }
+                            function moveDown() { if (currentIndex < mentionPop.matches.length - 1) currentIndex++ }
+
+                            delegate: ItemDelegate {
+                                id: mrow
+                                required property var modelData
+                                required property int index
+                                width: mentionList.width
+                                highlighted: index === mentionList.currentIndex
+                                text: "@ " + modelData.title
+                                onClicked: win.applyMention(modelData)
+                                background: Rectangle {
+                                    radius: 6
+                                    color: mrow.highlighted ? "#e8eaf6"
+                                         : mrow.hovered ? "#eeeeee" : "transparent"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Activity timeline: the technical side of a turn — the commands the agent
+        // runs (list_documents, update_document, …), their results and status —
+        // kept out of the conversation so the chat shows only the actual reply.
+        // Collapsed by default; slides out from the side while the agent works.
+        Rectangle {
+            id: techPane
+            visible: win.chatOpen
+            // wider when showing full (untruncated) output
+            property real openW: win.activityFull ? 460 : 250
+            // animate a plain property (Behaviors can't target attached props),
+            // then feed it to the SplitView so the panel slides in/out
+            property real pw: win.activityExpanded ? openW : 0
+            Behavior on pw {
+                NumberAnimation { duration: 280; easing.type: Easing.OutCubic }
+            }
+            SplitView.preferredWidth: pw
+            SplitView.minimumWidth: 0
+            clip: true
+            color: "#eceff1"
+
+            // fixed-width content pinned to the left edge: as the pane widens the
+            // block slides in from the right rather than reflowing every frame
+            ColumnLayout {
+                anchors.left: parent.left
+                width: techPane.openW
+                height: parent.height
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 48
+                    color: "#cfd8dc"
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 4
+                        spacing: 2
+                        Label {
+                            text: "Activity"
+                            Layout.fillWidth: true
+                            font.pixelSize: 15
+                            font.weight: Font.Medium
+                            color: "#455a64"
+                        }
+                        ToolButton {
+                            text: win.activityFull ? "Collapse" : "Expand"
+                            font.capitalization: Font.MixedCase
+                            font.pixelSize: 12
+                            Material.foreground: "#455a64"
+                            enabled: techModel.count > 0
+                            onClicked: win.activityFull = !win.activityFull
+                            HoverTip { text: win.activityFull ? "Truncate long output"
+                                                             : "Show full output" }
+                        }
+                        ToolButton {
+                            text: "✕"
+                            implicitWidth: 32
+                            implicitHeight: 32
+                            Material.foreground: "#455a64"
+                            onClicked: win.activityPinned = false
+                            HoverTip { text: "Hide the activity log" }
+                        }
+                    }
+                }
+
+                ListView {
+                    id: techList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: techModel
+                    spacing: 0
+                    topMargin: 10
+                    bottomMargin: 10
+                    ScrollBar.vertical: ScrollBar {}
+
+                    Label {
+                        anchors.centerIn: parent
+                        width: parent.width - 32
+                        visible: techModel.count === 0
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        opacity: 0.55
+                        font.pixelSize: 12
+                        color: "#607d8b"
+                        text: "Commands the assistant runs and their output appear here."
+                    }
+
+                    delegate: Item {
+                        id: ev
+                        required property var model
+                        width: techList.width
+                        implicitHeight: evText.implicitHeight + 14
+                        readonly property bool isErr: model.kind === "error"
+                        // tool results are the indented "↳" lines; dim them a touch
+                        readonly property bool isResult: model.text.indexOf("↳") === 0
+                                                       || model.text.indexOf("   ↳") === 0
+
+                        // continuous rail + a dot per event
+                        Rectangle {
+                            x: 15
+                            width: 2
+                            height: parent.height
+                            color: "#b0bec5"
+                        }
+                        Rectangle {
+                            x: 11
+                            y: 7
+                            width: 10
+                            height: 10
+                            radius: 5
+                            color: ev.isErr ? "#c62828" : ev.isResult ? "#b0bec5" : "#789098"
+                            border.width: 2
+                            border.color: "#eceff1"
+                        }
+                        Label {
+                            id: evText
+                            x: 32
+                            y: 4
+                            width: parent.width - 40
+                            text: ev.model.text
+                            wrapMode: Text.Wrap
+                            // truncate to a few lines unless the user expanded the log
+                            maximumLineCount: win.activityFull ? 100000 : 4
+                            elide: Text.ElideRight
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                            color: ev.isErr ? "#c62828" : ev.isResult ? "#607d8b" : "#455a64"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ListModel { id: chatModel }
+    ListModel { id: techModel }
+
+    Connections {
+        target: chat
+        function onTurnStarted() { win.chatBusy = true }
+        function onTurnFinished() { win.chatBusy = false }
+        function onAssistantText(text) {
+            chatModel.append({ kind: "assistant", text: text })
+            Qt.callLater(win.chatScrollEnd)
+        }
+        // technical events go to the Activity timeline, not the conversation
+        function onToolActivity(line) {
+            techModel.append({ kind: "tool", text: line })
+            Qt.callLater(win.techScrollEnd)
+        }
+        function onNote(line) {
+            techModel.append({ kind: "note", text: line })
+            Qt.callLater(win.techScrollEnd)
+        }
+        function onErrorOccurred(message) {
+            // failures stay in the conversation so they're not missed
+            chatModel.append({ kind: "error", text: message })
+            win.chatBusy = false
+            Qt.callLater(win.chatScrollEnd)
         }
     }
 

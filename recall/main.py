@@ -10,6 +10,7 @@ from PySide6.QtGui import (QColor, QFont, QGuiApplication, QIcon,
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
+from .chat import ChatAgent
 from .doctreemodel import DocTreeModel
 from .mcp_server import TOOLS, client_config
 from .revise import Reviser
@@ -24,8 +25,11 @@ CODE_FG = QColor("#eceff1")           # light code text; QML draws the dark slab
 PARA_MARGIN = 14        # plain paragraphs, blockquotes, etc.
 LIST_MARGIN = 6         # tighter rhythm between items within a list
 HEADING_BOTTOM = 10
-CODE_MARGIN = 28        # outside the slab; QML's slab overdraws CODE_SLAB_PAD
-                        # of it (12px), leaving a 16px visible gap each side
+CODE_MARGIN = 30        # bottom gap outside the slab; QML's slab overdraws 18
+                        # of it, leaving a 12px visible gap below the code
+CODE_TOP = 46           # larger top gap: the slab overdraws 32 of it for a
+                        # header strip that holds the copy button clear of the
+                        # code, leaving a 14px visible gap above the block
 
 
 class Highlighter(QObject):
@@ -125,9 +129,9 @@ class Highlighter(QObject):
                 # the run from the start/end positions we report.
                 if run is None:
                     run = {"start": block.position(), "lines": []}
-                    if bf.topMargin() != CODE_MARGIN:
+                    if bf.topMargin() != CODE_TOP:
                         nbf = QTextBlockFormat()
-                        nbf.setTopMargin(CODE_MARGIN)
+                        nbf.setTopMargin(CODE_TOP)
                         QTextCursor(block).mergeBlockFormat(nbf)
                 it = block.begin()
                 styled = (not it.atEnd() and
@@ -199,6 +203,9 @@ def main():
     store = Store(default_db_path())
     model = DocTreeModel(store)
     store.changed.connect(model.reload)
+    # parallel tree of template documents (the Templates view swaps to this)
+    template_model = DocTreeModel(store, templates=True)
+    store.changed.connect(template_model.reload)
 
     # Pick up writes from the external MCP server: SQLite's data_version pragma
     # changes whenever another connection commits (file watching misses WAL writes).
@@ -209,12 +216,15 @@ def main():
 
     highlighter = Highlighter()
     reviser = Reviser(store)
+    chat = ChatAgent(store)
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("store", store)
     engine.rootContext().setContextProperty("docModel", model)
+    engine.rootContext().setContextProperty("templateModel", template_model)
     engine.rootContext().setContextProperty("highlighter", highlighter)
     engine.rootContext().setContextProperty("reviser", reviser)
+    engine.rootContext().setContextProperty("chat", chat)
     engine.rootContext().setContextProperty("mcpTools", TOOLS)
     engine.rootContext().setContextProperty("mcpConfigJson",
                                             json.dumps(client_config(), indent=2))
