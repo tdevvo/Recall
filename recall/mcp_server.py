@@ -178,7 +178,19 @@ def main():
     QCoreApplication.setApplicationName("Recall")
     store = Store(default_db_path())
 
-    for line in sys.stdin:
+    # Read with readline(), NOT `for line in sys.stdin`: file iteration reads
+    # ahead in blocks, so the client's first request (initialize) can sit unseen
+    # in the buffer while the client waits for our reply — a deadlock the client
+    # reports as "MCP server failed to connect". readline() returns each line as
+    # soon as its newline arrives. (line_buffering keeps our replies flushed too.)
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break  # EOF: the client closed the pipe
         line = line.strip()
         if not line:
             continue

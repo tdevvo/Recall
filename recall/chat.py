@@ -203,11 +203,29 @@ class ChatAgent(QObject):
 
         def on_out():
             state["out"] += bytes(p.readAllStandardOutput()).decode("utf-8", "replace")
-            if not state["answered"] and '"result"' in state["out"]:
-                state["answered"] = True
-                self.toolActivity.emit("⚙ MCP self-test: OK — the server started and "
-                                       "answered initialize.")
+            if state["answered"] or "\n" not in state["out"]:
+                return
+            state["answered"] = True
+            # the FIRST line must be a clean JSON-RPC result. Anything else on
+            # stdout (a stray print, a warning, a banner) corrupts the protocol
+            # stream and the client reports the server as failed even though it
+            # "ran" — so check strictly, not just for the substring "result".
+            first = state["out"].split("\n", 1)[0].strip()
+            try:
+                obj = json.loads(first)
+            except ValueError:
+                self.toolActivity.emit("⚙ MCP self-test FAILED: the server wrote "
+                                       "non-JSON to stdout, which breaks the protocol. "
+                                       "First line was: " + self._short(first, 2000))
                 p.kill()
+                return
+            if isinstance(obj, dict) and "result" in obj:
+                self.toolActivity.emit("⚙ MCP self-test: OK — the server started and "
+                                       "answered initialize cleanly.")
+            else:
+                self.toolActivity.emit("⚙ MCP self-test: the server replied but not with "
+                                       "a valid initialize result: " + self._short(first, 2000))
+            p.kill()
 
         def on_err():
             state["err"] += bytes(p.readAllStandardError()).decode("utf-8", "replace")
